@@ -1,2 +1,35 @@
-<div id="app">Local AI Translator</div>
-<script type="module" src="./main.ts"></script>
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Local AI Translator</title>
+  </head>
+  <body>
+    <main class="popup">
+      <header class="header">
+        <div>
+          <h1>Local AI Translator</h1>
+          <p id="statusText">Loading...</p>
+        </div>
+        <span id="statusDot" class="status-dot"></span>
+      </header>
+
+      <label>Target language <input id="targetLanguage" /></label>
+      <label>Ollama endpoint <input id="ollamaEndpoint" /></label>
+      <label>Model <input id="ollamaModel" /></label>
+
+      <label class="toggle">
+        <input id="autoTranslate" type="checkbox" />
+        <span>Auto translate foreign pages</span>
+      </label>
+
+      <section class="actions">
+        <button id="saveButton">Save</button>
+        <button id="translateButton" type="button">Translate page</button>
+        <button id="restoreButton" type="button">Restore</button>
+      </section>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
