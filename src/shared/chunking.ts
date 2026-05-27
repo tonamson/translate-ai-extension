@@ -7,6 +7,9 @@ export function chunkTextItems(items: TextItem[], maxChars: number): TextItem[][
 
   for (const item of items) {
     const itemChars = item.text.length;
+    // current.length accounts for one separator character between each adjacent
+    // item when the chunk is serialized for translation. Reaching maxChars is a
+    // boundary, so the next item starts a new chunk instead of filling it.
     const nextChars = currentChars + itemChars + current.length;
 
     if (current.length > 0 && nextChars >= maxChars) {
