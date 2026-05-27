@@ -7,11 +7,25 @@ export type CollectedTextNode = TextItem & {
 const SKIP_TAGS = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEXTAREA", "INPUT", "SELECT", "OPTION"]);
 
 function shouldSkipElement(element: Element): boolean {
-  if (element.closest("[data-translate-ai-ui='true']")) return true;
   if (SKIP_TAGS.has(element.tagName)) return true;
+  if (element.getAttribute("data-translate-ai-ui") === "true") return true;
+  if (element.hasAttribute("hidden")) return true;
+  if (element.getAttribute("aria-hidden") === "true") return true;
 
   const style = window.getComputedStyle(element);
-  return style.display === "none" || style.visibility === "hidden";
+  return style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse";
+}
+
+function hasSkippedAncestor(element: Element, root: ParentNode): boolean {
+  let current: Element | null = element;
+
+  while (current) {
+    if (shouldSkipElement(current)) return true;
+    if (current === root) return false;
+    current = current.parentElement;
+  }
+
+  return false;
 }
 
 export function collectVisibleTextNodes(root: ParentNode = document.body): CollectedTextNode[] {
@@ -20,7 +34,7 @@ export function collectVisibleTextNodes(root: ParentNode = document.body): Colle
       const text = node.textContent?.replace(/\s+/g, " ").trim();
       const parent = node.parentElement;
 
-      if (!text || !parent || shouldSkipElement(parent)) {
+      if (!text || !parent || hasSkippedAncestor(parent, root)) {
         return NodeFilter.FILTER_REJECT;
       }
 

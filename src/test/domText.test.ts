@@ -16,4 +16,18 @@ describe("collectVisibleTextNodes", () => {
     const items = collectVisibleTextNodes(document.body);
     expect(items.map((item) => item.text)).toEqual(["Hello world"]);
   });
+
+  it("skips text inside hidden ancestors", () => {
+    document.body.innerHTML = `
+      <main>
+        <p>Visible text</p>
+        <div style="display: none"><p>display hidden</p></div>
+        <section hidden><p>hidden attribute</p></section>
+        <article aria-hidden="true"><p>aria hidden</p></article>
+      </main>
+    `;
+
+    const items = collectVisibleTextNodes(document.body);
+    expect(items.map((item) => item.text)).toEqual(["Visible text"]);
+  });
 });
