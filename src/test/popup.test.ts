@@ -6,9 +6,9 @@ const popupHtml = `
     <header class="header">
       <div>
         <h1>Local AI Translator</h1>
-        <p id="statusText">Loading...</p>
+        <p id="statusText" aria-live="polite">Loading...</p>
       </div>
-      <span id="statusDot" class="status-dot"></span>
+      <span id="statusDot" class="status-dot" aria-hidden="true"></span>
     </header>
 
     <label>Target language <input id="targetLanguage" /></label>
@@ -50,9 +50,9 @@ async function loadPopup() {
 }
 
 async function flushPromises() {
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
+  for (let index = 0; index < 6; index += 1) {
+    await Promise.resolve();
+  }
 }
 
 beforeEach(() => {
@@ -123,6 +123,27 @@ describe("popup UI", () => {
     expect(document.querySelector("#statusText")?.textContent).toBe("Settings saved");
   });
 
+  it("shows an error when saving settings returns an error response", async () => {
+    const sendMessage = vi
+      .fn()
+      .mockResolvedValueOnce(settings)
+      .mockResolvedValueOnce({ status: "idle" })
+      .mockResolvedValueOnce({ error: "Settings failed" });
+
+    vi.stubGlobal("chrome", {
+      runtime: { sendMessage },
+      tabs: { query: vi.fn().mockResolvedValue([{ id: 42, url: "https://example.com" }]), sendMessage: vi.fn() }
+    });
+
+    await loadPopup();
+
+    document.querySelector<HTMLButtonElement>("#saveButton")!.click();
+    await flushPromises();
+
+    expect(document.querySelector("#statusText")?.textContent).toBe("Settings failed");
+    expect((document.querySelector("#statusDot") as HTMLSpanElement).dataset.status).toBe("error");
+  });
+
   it("sends page commands to the active tab", async () => {
     const tabSendMessage = vi.fn().mockResolvedValue(undefined);
 
@@ -130,7 +151,7 @@ describe("popup UI", () => {
       runtime: {
         sendMessage: vi.fn().mockResolvedValueOnce(settings).mockResolvedValueOnce({ status: "idle" })
       },
-      tabs: { query: vi.fn().mockResolvedValue([{ id: 42 }]), sendMessage: tabSendMessage }
+      tabs: { query: vi.fn().mockResolvedValue([{ id: 42, url: "https://example.com" }]), sendMessage: tabSendMessage }
     });
 
     await loadPopup();
@@ -143,5 +164,103 @@ describe("popup UI", () => {
     await flushPromises();
     expect(tabSendMessage).toHaveBeenCalledWith(42, { type: "RESTORE_ORIGINALS" });
     expect(window.close).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not send page commands when there is no active tab", async () => {
+    const tabSendMessage = vi.fn();
+
+    vi.stubGlobal("chrome", {
+      runtime: {
+        sendMessage: vi.fn().mockResolvedValueOnce(settings)
+      },
+      tabs: { query: vi.fn().mockResolvedValue([]), sendMessage: tabSendMessage }
+    });
+
+    await loadPopup();
+
+    document.querySelector<HTMLButtonElement>("#translateButton")!.click();
+    await flushPromises();
+
+    expect(tabSendMessage).not.toHaveBeenCalled();
+    expect(window.close).not.toHaveBeenCalled();
+    expect(document.querySelector("#statusText")?.textContent).toBe("Open a web page to translate.");
+    expect((document.querySelector("#statusDot") as HTMLSpanElement).dataset.status).toBe("error");
+  });
+
+  it("does not send page commands when the active tab has no id", async () => {
+    const tabSendMessage = vi.fn();
+
+    vi.stubGlobal("chrome", {
+      runtime: {
+        sendMessage: vi.fn().mockResolvedValueOnce(settings)
+      },
+      tabs: { query: vi.fn().mockResolvedValue([{ url: "https://example.com" }]), sendMessage: tabSendMessage }
+    });
+
+    await loadPopup();
+
+    document.querySelector<HTMLButtonElement>("#translateButton")!.click();
+    await flushPromises();
+
+    expect(tabSendMessage).not.toHaveBeenCalled();
+    expect(window.close).not.toHaveBeenCalled();
+    expect(document.querySelector("#statusText")?.textContent).toBe("Open a web page to translate.");
+    expect((document.querySelector("#statusDot") as HTMLSpanElement).dataset.status).toBe("error");
+  });
+
+  it("does not send page commands to browser pages", async () => {
+    const tabSendMessage = vi.fn();
+
+    vi.stubGlobal("chrome", {
+      runtime: {
+        sendMessage: vi.fn().mockResolvedValueOnce(settings)
+      },
+      tabs: { query: vi.fn().mockResolvedValue([{ id: 42, url: "chrome://extensions" }]), sendMessage: tabSendMessage }
+    });
+
+    await loadPopup();
+
+    document.querySelector<HTMLButtonElement>("#restoreButton")!.click();
+    await flushPromises();
+
+    expect(tabSendMessage).not.toHaveBeenCalled();
+    expect(window.close).not.toHaveBeenCalled();
+    expect(document.querySelector("#statusText")?.textContent).toBe("Open a web page to translate.");
+    expect((document.querySelector("#statusDot") as HTMLSpanElement).dataset.status).toBe("error");
+  });
+
+  it("shows a compact error when active tab messaging is rejected", async () => {
+    const tabSendMessage = vi.fn().mockRejectedValue(new Error("Receiving end does not exist."));
+
+    vi.stubGlobal("chrome", {
+      runtime: {
+        sendMessage: vi.fn().mockResolvedValueOnce(settings).mockResolvedValueOnce({ status: "idle" })
+      },
+      tabs: { query: vi.fn().mockResolvedValue([{ id: 42, url: "https://example.com" }]), sendMessage: tabSendMessage }
+    });
+
+    await loadPopup();
+
+    document.querySelector<HTMLButtonElement>("#translateButton")!.click();
+    await flushPromises();
+
+    expect(tabSendMessage).toHaveBeenCalledWith(42, { type: "MANUAL_TRANSLATE_PAGE" });
+    expect(window.close).not.toHaveBeenCalled();
+    expect(document.querySelector("#statusText")?.textContent).toBe("This page is not ready for translation.");
+    expect((document.querySelector("#statusDot") as HTMLSpanElement).dataset.status).toBe("error");
+  });
+
+  it("marks the status text as live and hides the decorative status dot", async () => {
+    vi.stubGlobal("chrome", {
+      runtime: {
+        sendMessage: vi.fn().mockResolvedValueOnce(settings).mockResolvedValueOnce({ status: "idle" })
+      },
+      tabs: { query: vi.fn().mockResolvedValue([{ id: 42, url: "https://example.com" }]), sendMessage: vi.fn() }
+    });
+
+    await loadPopup();
+
+    expect(document.querySelector("#statusText")?.getAttribute("aria-live")).toBe("polite");
+    expect(document.querySelector("#statusDot")?.getAttribute("aria-hidden")).toBe("true");
   });
 });

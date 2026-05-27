@@ -76,18 +76,23 @@ input:focus {
 
 .actions {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-columns: minmax(64px, 0.8fr) minmax(116px, 1.4fr) minmax(76px, 1fr);
   gap: 8px;
 }
 
 button {
+  min-width: 0;
   height: 34px;
   border: 0;
   border-radius: 7px;
+  padding: 0 10px;
   background: #2563eb;
   color: #ffffff;
-  font: inherit;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1;
   font-weight: 700;
+  white-space: nowrap;
   cursor: pointer;
 }
 
