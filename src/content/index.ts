@@ -2,20 +2,48 @@ import { collectVisibleTextNodes, createPageSample, type CollectedTextNode } fro
 import { shouldAutoTranslate } from "../shared/translationDecision";
 import type { ExtensionSettings, PageAnalysis, TextItem } from "../shared/types";
 
-const originals = new Map<string, { node: Text; text: string }>();
+const originals = new Map<Text, string>();
 let selectionButton: HTMLButtonElement | null = null;
 let selectionPanel: HTMLDivElement | null = null;
 
-function sendMessage<T>(message: unknown): Promise<T> {
-  return chrome.runtime.sendMessage(message) as Promise<T>;
+type BackgroundErrorResponse = {
+  error: string;
+};
+
+function isBackgroundErrorResponse(value: unknown): value is BackgroundErrorResponse {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "error" in value &&
+    typeof (value as { error?: unknown }).error === "string"
+  );
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function sendMessage<T>(message: unknown): Promise<T> {
+  const response = await chrome.runtime.sendMessage(message);
+  if (isBackgroundErrorResponse(response)) {
+    throw new Error(response.error);
+  }
+  return response as T;
 }
 
 function rememberOriginals(items: CollectedTextNode[]): void {
   for (const item of items) {
-    if (!originals.has(item.id)) {
-      originals.set(item.id, { node: item.node, text: item.node.textContent ?? "" });
+    if (!originals.has(item.node)) {
+      originals.set(item.node, item.node.textContent ?? "");
     }
   }
+}
+
+function replaceTextPreservingBoundaryWhitespace(node: Text, translated: string): void {
+  const currentText = node.textContent ?? "";
+  const leadingWhitespace = currentText.match(/^\s*/)?.[0] ?? "";
+  const trailingWhitespace = currentText.match(/\s*$/)?.[0] ?? "";
+  node.textContent = `${leadingWhitespace}${translated.trim()}${trailingWhitespace}`;
 }
 
 async function translatePage(): Promise<void> {
@@ -37,13 +65,13 @@ async function translatePage(): Promise<void> {
   const translatedById = new Map(response.items.map((item) => [item.id, item.text]));
   for (const item of nodes) {
     const translated = translatedById.get(item.id);
-    if (translated) item.node.textContent = translated;
+    if (translated !== undefined) replaceTextPreservingBoundaryWhitespace(item.node, translated);
   }
 }
 
 function restoreOriginals(): void {
-  for (const original of originals.values()) {
-    original.node.textContent = original.text;
+  for (const [node, text] of originals) {
+    node.textContent = text;
   }
 }
 
@@ -103,8 +131,12 @@ function showSelectionButton(): void {
 
   selectionButton.addEventListener("click", async () => {
     selectionButton!.textContent = "Translating...";
-    const result = await sendMessage<{ text: string }>({ type: "TRANSLATE_SELECTION", text: selectedText });
-    showSelectionPanel(result.text);
+    try {
+      const result = await sendMessage<{ text: string }>({ type: "TRANSLATE_SELECTION", text: selectedText });
+      showSelectionPanel(result.text);
+    } catch (error) {
+      showSelectionPanel(getErrorMessage(error));
+    }
   });
 
   document.body.append(selectionButton);
@@ -114,7 +146,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "MANUAL_TRANSLATE_PAGE") {
     translatePage()
       .then(() => sendResponse({ ok: true }))
-      .catch((error) => sendResponse({ error: String(error) }));
+      .catch((error) => sendResponse({ error: getErrorMessage(error) }));
     return true;
   }
   if (message?.type === "RESTORE_ORIGINALS") {
