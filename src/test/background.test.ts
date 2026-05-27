@@ -149,6 +149,20 @@ describe("background tab status", () => {
     await expect(sendMessage({ type: "GET_TAB_STATUS", tabId: 11 })).resolves.toEqual({ status: "translated" });
   });
 
+  it("uses the sender tab id for content-origin tab status updates", async () => {
+    await loadBackground();
+
+    await sendMessage(
+      { type: "SET_TAB_STATUS", status: { status: "not-needed", message: "Not enough text to detect" } },
+      { tab: { id: 12 } as chrome.tabs.Tab }
+    );
+
+    await expect(sendMessage({ type: "GET_TAB_STATUS", tabId: 12 })).resolves.toEqual({
+      status: "not-needed",
+      message: "Not enough text to detect"
+    });
+  });
+
   it("clears tab status when the tab is removed", async () => {
     await loadBackground();
 

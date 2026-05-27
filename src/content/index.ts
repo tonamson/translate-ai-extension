@@ -1,6 +1,6 @@
 import { collectVisibleTextNodes, createPageSample, type CollectedTextNode } from "./domText";
 import { shouldAutoTranslate } from "../shared/translationDecision";
-import type { ExtensionSettings, PageAnalysis, TextItem } from "../shared/types";
+import type { ExtensionSettings, PageAnalysis, TabStatus, TextItem } from "../shared/types";
 
 const originals = new Map<Text, string>();
 let selectionButton: HTMLButtonElement | null = null;
@@ -31,6 +31,10 @@ async function sendMessage<T>(message: unknown): Promise<T> {
   return response as T;
 }
 
+async function setTabStatus(status: TabStatus): Promise<void> {
+  await sendMessage({ type: "SET_TAB_STATUS", status });
+}
+
 function rememberOriginals(items: CollectedTextNode[]): void {
   for (const item of items) {
     if (!originals.has(item.node)) {
@@ -46,15 +50,23 @@ function replaceTextPreservingBoundaryWhitespace(node: Text, translated: string)
   node.textContent = `${leadingWhitespace}${translated.trim()}${trailingWhitespace}`;
 }
 
-async function translatePage(): Promise<void> {
+function shouldTranslatePage(settings: ExtensionSettings, analysis: PageAnalysis, force: boolean): boolean {
+  if (force) return analysis.isForeign && analysis.shouldTranslate;
+  return shouldAutoTranslate(settings, analysis);
+}
+
+async function translatePage({ force = false }: { force?: boolean } = {}): Promise<void> {
   const settings = await sendMessage<ExtensionSettings>({ type: "GET_SETTINGS" });
   const nodes = collectVisibleTextNodes();
   const sample = createPageSample(nodes);
 
-  if (sample.length < 40) return;
+  if (sample.length < 40) {
+    await setTabStatus({ status: "not-needed", message: "Not enough text to detect" });
+    return;
+  }
 
   const analysis = await sendMessage<PageAnalysis>({ type: "ANALYZE_PAGE", sample });
-  if (!shouldAutoTranslate(settings, analysis)) return;
+  if (!shouldTranslatePage(settings, analysis, force)) return;
 
   rememberOriginals(nodes);
   const response = await sendMessage<{ items: TextItem[] }>({
@@ -69,10 +81,11 @@ async function translatePage(): Promise<void> {
   }
 }
 
-function restoreOriginals(): void {
+async function restoreOriginals(): Promise<void> {
   for (const [node, text] of originals) {
     node.textContent = text;
   }
+  await setTabStatus({ status: "restored" });
 }
 
 function removeSelectionUi(): void {
@@ -144,14 +157,16 @@ function showSelectionButton(): void {
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "MANUAL_TRANSLATE_PAGE") {
-    translatePage()
+    translatePage({ force: true })
       .then(() => sendResponse({ ok: true }))
       .catch((error) => sendResponse({ error: getErrorMessage(error) }));
     return true;
   }
   if (message?.type === "RESTORE_ORIGINALS") {
-    restoreOriginals();
-    sendResponse({ ok: true });
+    restoreOriginals()
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) => sendResponse({ error: getErrorMessage(error) }));
+    return true;
   }
   return false;
 });

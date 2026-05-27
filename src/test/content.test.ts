@@ -75,6 +75,7 @@ beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
   document.body.innerHTML = "";
+  settings.autoTranslate = true;
   installChromeMock();
 });
 
@@ -97,6 +98,41 @@ describe("content script", () => {
     expect(document.querySelector("p")?.textContent).toBe(
       "This paragraph has enough English text for page translation."
     );
+  });
+
+  it("manual page translation bypasses the auto translate setting", async () => {
+    settings.autoTranslate = false;
+    await loadContentScript();
+    document.body.innerHTML = "<main><p>This paragraph has enough English text for page translation.</p></main>";
+
+    await expect(sendContentMessage({ type: "MANUAL_TRANSLATE_PAGE" })).resolves.toEqual({ ok: true });
+
+    expect(document.querySelector("p")?.textContent).toBe(
+      "vi:This paragraph has enough English text for page translation."
+    );
+  });
+
+  it("reports not-needed status when page text is too short to detect", async () => {
+    await loadContentScript();
+    document.body.innerHTML = "<main><p>Too short.</p></main>";
+
+    await expect(sendContentMessage({ type: "MANUAL_TRANSLATE_PAGE" })).resolves.toEqual({ ok: true });
+
+    expect(sentMessages).toContainEqual({
+      type: "SET_TAB_STATUS",
+      status: { status: "not-needed", message: "Not enough text to detect" }
+    });
+  });
+
+  it("reports restored status after restoring originals", async () => {
+    await loadContentScript();
+
+    await expect(sendContentMessage({ type: "RESTORE_ORIGINALS" })).resolves.toEqual({ ok: true });
+
+    expect(sentMessages).toContainEqual({
+      type: "SET_TAB_STATUS",
+      status: { status: "restored" }
+    });
   });
 
   it("returns an error response when page analysis fails in the background", async () => {

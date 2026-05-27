@@ -25,6 +25,20 @@ function stubOllamaResponse(response: unknown, ok = true, status = 200) {
   return fetchMock;
 }
 
+function stubOllamaResponses(responses: unknown[]) {
+  const fetchMock = vi.fn();
+  for (const response of responses) {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: vi.fn().mockResolvedValue(response)
+    });
+  }
+
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -105,6 +119,47 @@ describe("analyzeLanguage", () => {
     stubOllamaResponse({ response: "{\"detectedLanguage\":\"English\"}" });
 
     await expect(analyzeLanguage(settings, "hello")).rejects.toThrow("Invalid PageAnalysis response");
+  });
+
+  it("repairs malformed page analysis JSON with one stricter retry", async () => {
+    const fetchMock = stubOllamaResponses([
+      { response: "The answer is detectedLanguage: English" },
+      {
+        response: JSON.stringify({
+          detectedLanguage: "English",
+          confidence: 0.98,
+          isForeign: true,
+          shouldTranslate: true,
+          reason: "The page is in English."
+        })
+      }
+    ]);
+
+    await expect(analyzeLanguage(settings, "hello")).resolves.toEqual({
+      detectedLanguage: "English",
+      confidence: 0.98,
+      isForeign: true,
+      shouldTranslate: true,
+      reason: "The page is in English."
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const retryBody = JSON.parse(fetchMock.mock.calls[1][1].body);
+    expect(retryBody.prompt).toContain("valid JSON");
+    expect(retryBody.prompt).toContain("PageAnalysis");
+    expect(retryBody.prompt).toContain("The answer is detectedLanguage: English");
+  });
+
+  it("throws a clear error when page analysis JSON repair retry is invalid", async () => {
+    const fetchMock = stubOllamaResponses([
+      { response: "The answer is detectedLanguage: English" },
+      { response: JSON.stringify({ detectedLanguage: "English" }) }
+    ]);
+
+    await expect(analyzeLanguage(settings, "hello")).rejects.toThrow(
+      "Invalid PageAnalysis response after JSON repair retry"
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
 

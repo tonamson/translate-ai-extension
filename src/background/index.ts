@@ -61,7 +61,9 @@ async function handleMessage(message: RuntimeMessage, sender: chrome.runtime.Mes
   }
   if (message.type === "GET_TAB_STATUS") return getTabStatus(message.tabId);
   if (message.type === "SET_TAB_STATUS") {
-    await setTabStatus(message.tabId, message.status);
+    const tabId = message.tabId ?? getSenderTabId(sender);
+    if (tabId === undefined) throw new Error("Missing tab id for tab status");
+    await setTabStatus(tabId, message.status);
     return { ok: true };
   }
 

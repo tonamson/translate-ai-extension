@@ -4,7 +4,7 @@
   "description": "Translate web pages with a local Ollama model.",
   "version": "0.1.0",
   "permissions": ["activeTab", "storage", "scripting"],
-  "host_permissions": ["http://localhost:11434/*", "http://127.0.0.1:11434/*"],
+  "host_permissions": ["http://localhost/*", "http://127.0.0.1/*"],
   "action": {
     "default_title": "Local AI Translator",
     "default_popup": "src/popup/index.html"
