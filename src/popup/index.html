@@ -15,14 +15,33 @@
         <span id="statusDot" class="status-dot" aria-hidden="true"></span>
       </header>
 
-      <label>Target language <input id="targetLanguage" /></label>
-      <label>Ollama endpoint <input id="ollamaEndpoint" /></label>
-      <label>Model <input id="ollamaModel" /></label>
-
-      <label class="toggle">
-        <input id="autoTranslate" type="checkbox" />
-        <span>Auto translate foreign pages</span>
+      <label>
+        Target language
+        <select id="targetLanguage">
+          <option value="Vietnamese">Vietnamese</option>
+          <option value="English">English</option>
+          <option value="Japanese">Japanese</option>
+          <option value="Korean">Korean</option>
+          <option value="Chinese">Chinese</option>
+          <option value="Thai">Thai</option>
+          <option value="Indonesian">Indonesian</option>
+          <option value="French">French</option>
+          <option value="German">German</option>
+          <option value="Spanish">Spanish</option>
+          <option value="Portuguese">Portuguese</option>
+          <option value="Russian">Russian</option>
+        </select>
       </label>
+      <label>
+        API type
+        <select id="apiProvider">
+          <option value="openai-compatible">OpenAI-compatible</option>
+          <option value="anthropic">Anthropic</option>
+        </select>
+      </label>
+      <label>API base URL <input id="openaiBaseUrl" /></label>
+      <label>AI model <input id="openaiModel" /></label>
+      <label>API key <input id="openaiApiKey" type="password" /></label>
 
       <section class="actions">
         <button id="saveButton">Save</button>

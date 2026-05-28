@@ -9,8 +9,10 @@ type RuntimeListener = (
 const settings = {
   targetLanguage: "Vietnamese",
   autoTranslate: true,
-  ollamaEndpoint: "http://localhost:11434",
-  ollamaModel: "llama3"
+  apiProvider: "openai-compatible",
+  openaiBaseUrl: "https://api.stepfun.ai/v1",
+  openaiModel: "example-model",
+  openaiApiKey: "123456"
 };
 
 let runtimeListener: RuntimeListener;
@@ -61,14 +63,37 @@ async function loadContentScript() {
 }
 
 async function flushPromises() {
-  await Promise.resolve();
-  await Promise.resolve();
+  for (let index = 0; index < 12; index += 1) {
+    await Promise.resolve();
+  }
+}
+
+function createDeferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((promiseResolve) => {
+    resolve = promiseResolve;
+  });
+  return { promise, resolve };
 }
 
 function sendContentMessage(message: { type: string }) {
   return new Promise<unknown>((resolve) => {
     runtimeListener(message, {}, resolve);
   });
+}
+
+async function waitFor(predicate: () => boolean, maxTicks = 20) {
+  for (let index = 0; index < maxTicks; index += 1) {
+    if (predicate()) return;
+    await Promise.resolve();
+  }
+}
+
+async function waitForScheduledBatch() {
+  await new Promise<void>((resolve) => {
+    window.setTimeout(resolve, 0);
+  });
+  await flushPromises();
 }
 
 beforeEach(() => {
@@ -80,12 +105,13 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  window.dispatchEvent(new Event("pagehide"));
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
 describe("content script", () => {
-  it("translates page text on request and restores original text", async () => {
+  it("replaces page text on request and restores original text", async () => {
     await loadContentScript();
     document.body.innerHTML = "<main><p>This paragraph has enough English text for page translation.</p></main>";
 
@@ -112,13 +138,14 @@ describe("content script", () => {
     );
   });
 
-  it("reports not-needed status when page text is too short to detect", async () => {
+  it("translates short text when translation is explicitly requested", async () => {
     await loadContentScript();
     document.body.innerHTML = "<main><p>Too short.</p></main>";
 
     await expect(sendContentMessage({ type: "MANUAL_TRANSLATE_PAGE" })).resolves.toEqual({ ok: true });
 
-    expect(sentMessages).toContainEqual({
+    expect(document.querySelector("p")?.textContent).toBe("vi:Too short.");
+    expect(sentMessages).not.toContainEqual({
       type: "SET_TAB_STATUS",
       status: { status: "not-needed", message: "Not enough text to detect" }
     });
@@ -135,12 +162,353 @@ describe("content script", () => {
     });
   });
 
-  it("returns an error response when page analysis fails in the background", async () => {
-    messageHandlers.ANALYZE_PAGE = () => ({ error: "analysis failed" });
+  it("shows a page translation indicator while translation is running", async () => {
+    const translation = createDeferred<{ items: { id: string; text: string }[] }>();
+    messageHandlers.TRANSLATE_ITEMS = () => translation.promise;
     await loadContentScript();
     document.body.innerHTML = "<main><p>This paragraph has enough English text for page translation.</p></main>";
 
-    await expect(sendContentMessage({ type: "MANUAL_TRANSLATE_PAGE" })).resolves.toEqual({ error: "analysis failed" });
+    const translationResponse = sendContentMessage({ type: "MANUAL_TRANSLATE_PAGE" });
+    await flushPromises();
+
+    const indicator = document.querySelector<HTMLDivElement>("[data-translate-ai-page-indicator='true']");
+    expect(indicator?.textContent).toContain("Translating");
+    expect(indicator?.querySelector("[data-translate-ai-progress='true']")).not.toBeNull();
+    expect(indicator?.style.position).toBe("fixed");
+    expect(indicator?.style.right).toBe("16px");
+    expect(indicator?.style.bottom).toBe("16px");
+
+    translation.resolve({
+      items: [{ id: "text-0", text: "vi:This paragraph has enough English text for page translation." }]
+    });
+    await expect(translationResponse).resolves.toEqual({ ok: true });
+
+    expect(document.querySelector("[data-translate-ai-page-indicator='true']")).toBeNull();
+  });
+
+  it("does not insert per-line translation loading markers", async () => {
+    const translation = createDeferred<{ items: { id: string; text: string }[] }>();
+    messageHandlers.TRANSLATE_ITEMS = () => translation.promise;
+    await loadContentScript();
+    document.body.innerHTML = "<main><p>This paragraph has enough English text for page translation.</p></main>";
+
+    const translationResponse = sendContentMessage({ type: "MANUAL_TRANSLATE_PAGE" });
+    await flushPromises();
+
+    expect(document.querySelector("[data-translate-ai-page-indicator='true']")).not.toBeNull();
+    expect(document.querySelector("[data-translate-ai-page-loading='true']")).toBeNull();
+
+    translation.resolve({
+      items: [{ id: "text-0", text: "vi:This paragraph has enough English text for page translation." }]
+    });
+    await expect(translationResponse).resolves.toEqual({ ok: true });
+  });
+
+  it("acknowledges page translation commands before the API request finishes", async () => {
+    const translation = createDeferred<{ items: { id: string; text: string }[] }>();
+    messageHandlers.TRANSLATE_ITEMS = () => translation.promise;
+    await loadContentScript();
+    document.body.innerHTML = "<main><p>This paragraph has enough English text for page translation.</p></main>";
+
+    await expect(sendContentMessage({ type: "MANUAL_TRANSLATE_PAGE" })).resolves.toEqual({ ok: true });
+    await waitFor(() => document.querySelector("[data-translate-ai-page-indicator='true']") !== null);
+
+    expect(document.querySelector("p")?.textContent).toBe(
+      "This paragraph has enough English text for page translation."
+    );
+
+    translation.resolve({
+      items: [{ id: "text-0", text: "vi:This paragraph has enough English text for page translation." }]
+    });
+    await waitFor(() => document.querySelector("p")?.textContent?.startsWith("vi:") === true);
+  });
+
+  it("opens a quick translate menu and translates new page text on demand", async () => {
+    await loadContentScript();
+    document.body.innerHTML = "<main><p>This paragraph has enough English text for page translation.</p></main>";
+
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+    const quickButton = document.querySelector<HTMLButtonElement>("[data-translate-ai-quick-action='true']");
+    expect(quickButton?.title).toBe("Translate page");
+
+    quickButton?.click();
+    const menu = document.querySelector<HTMLDivElement>("[data-translate-ai-quick-menu='true']");
+    expect(menu?.textContent).toContain("Dịch phần mới");
+    expect(menu?.textContent).toContain("Chọn vùng để dịch");
+
+    menu?.querySelector<HTMLButtonElement>("[data-translate-ai-menu-action='translate-new']")?.click();
+    await flushPromises();
+
+    expect(document.querySelector("p")?.textContent).toBe(
+      "vi:This paragraph has enough English text for page translation."
+    );
+  });
+
+  it("watches lazy-loaded content and translates newly added untranslated text", async () => {
+    vi.useFakeTimers();
+    const translatedItems: { id: string; text: string }[][] = [];
+    messageHandlers.TRANSLATE_ITEMS = (message) => {
+      translatedItems.push(message.items ?? []);
+      return {
+        items: message.items?.map((item) => ({ id: item.id, text: `vi:${item.text}` })) ?? []
+      };
+    };
+    await loadContentScript();
+    document.body.innerHTML = "<main><p>This original paragraph has enough English text for page translation.</p></main>";
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+
+    document.querySelector<HTMLButtonElement>("[data-translate-ai-quick-action='true']")?.click();
+    document.querySelector<HTMLButtonElement>("[data-translate-ai-menu-action='watch-page']")?.click();
+    await flushPromises();
+    expect(document.querySelector("p")?.textContent).toBe(
+      "vi:This original paragraph has enough English text for page translation."
+    );
+
+    document.querySelector("main")?.append(
+      Object.assign(document.createElement("p"), {
+        textContent: "This lazy paragraph appears later and should be translated."
+      })
+    );
+    await Promise.resolve();
+    vi.advanceTimersByTime(650);
+    await flushPromises();
+
+    expect(translatedItems).toHaveLength(2);
+    expect(translatedItems[1].map((item) => item.text)).toEqual([
+      "This lazy paragraph appears later and should be translated."
+    ]);
+  });
+
+  it("translates new region content that appears while a previous region request is still running", async () => {
+    vi.useFakeTimers();
+    const firstTranslation = createDeferred<{ items: { id: string; text: string }[] }>();
+    const translatedItems: { id: string; text: string }[][] = [];
+    messageHandlers.TRANSLATE_ITEMS = (message) => {
+      translatedItems.push(message.items ?? []);
+      if (translatedItems.length === 1) return firstTranslation.promise;
+      return {
+        items: message.items?.map((item) => ({ id: item.id, text: `vi:${item.text}` })) ?? []
+      };
+    };
+    await loadContentScript();
+    document.body.innerHTML = `
+      <main>
+        <section id="region"><p>This original region text should translate first.</p></section>
+      </main>
+    `;
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+
+    document.querySelector<HTMLButtonElement>("[data-translate-ai-quick-action='true']")?.click();
+    document.querySelector<HTMLButtonElement>("[data-translate-ai-menu-action='pick-region']")?.click();
+    document.querySelector<HTMLElement>("#region")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flushPromises();
+
+    document.querySelector("#region")?.append(
+      Object.assign(document.createElement("p"), {
+        textContent: "This delayed region text appears before the first request finishes."
+      })
+    );
+    await Promise.resolve();
+    vi.advanceTimersByTime(650);
+    await flushPromises();
+
+    firstTranslation.resolve({
+      items: [{ id: "text-0", text: "vi:This original region text should translate first." }]
+    });
+    await flushPromises();
+    vi.advanceTimersByTime(0);
+    await flushPromises();
+
+    expect(translatedItems).toHaveLength(2);
+    expect(translatedItems[1].map((item) => item.text)).toEqual([
+      "This delayed region text appears before the first request finishes."
+    ]);
+    expect(document.querySelector("#region p:last-child")?.textContent).toBe(
+      "vi:This delayed region text appears before the first request finishes."
+    );
+  });
+
+  it("watches only a picked page region until paused", async () => {
+    vi.useFakeTimers();
+    const translatedItems: { id: string; text: string }[][] = [];
+    messageHandlers.TRANSLATE_ITEMS = (message) => {
+      translatedItems.push(message.items ?? []);
+      return {
+        items: message.items?.map((item) => ({ id: item.id, text: `vi:${item.text}` })) ?? []
+      };
+    };
+    await loadContentScript();
+    document.body.innerHTML = `
+      <main>
+        <section id="left"><p>This left section has enough English text for page translation.</p></section>
+        <section id="right"><p>This right section must stay original for now.</p></section>
+      </main>
+    `;
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+
+    document.querySelector<HTMLButtonElement>("[data-translate-ai-quick-action='true']")?.click();
+    document.querySelector<HTMLButtonElement>("[data-translate-ai-menu-action='pick-region']")?.click();
+    document.querySelector<HTMLElement>("#left")?.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    const highlight = document.querySelector<HTMLDivElement>("[data-translate-ai-region-highlight='true']");
+    expect(highlight?.style.background).toBe("rgba(37, 99, 235, 0.12)");
+    expect(highlight?.style.pointerEvents).toBe("none");
+    expect(document.querySelector("[data-translate-ai-page-indicator='true']")?.textContent).toContain(
+      "Click vùng cần dịch"
+    );
+    document.querySelector<HTMLElement>("#left")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flushPromises();
+
+    expect(document.querySelector("#left p")?.textContent).toBe(
+      "vi:This left section has enough English text for page translation."
+    );
+    expect(document.querySelector("#right p")?.textContent).toBe("This right section must stay original for now.");
+
+    document.querySelector("#left")?.append(
+      Object.assign(document.createElement("p"), {
+        textContent: "This lazy left paragraph appears later and should be translated."
+      })
+    );
+    document.querySelector("#right")?.append(
+      Object.assign(document.createElement("p"), {
+        textContent: "This lazy right paragraph should not be translated by region watch."
+      })
+    );
+    await Promise.resolve();
+    vi.advanceTimersByTime(650);
+    await flushPromises();
+
+    expect(document.querySelector("#left p:last-child")?.textContent).toBe(
+      "vi:This lazy left paragraph appears later and should be translated."
+    );
+    expect(document.querySelector("#right p:last-child")?.textContent).toBe(
+      "This lazy right paragraph should not be translated by region watch."
+    );
+
+    document.querySelector<HTMLButtonElement>("[data-translate-ai-quick-action='true']")?.click();
+    expect(document.querySelector("[data-translate-ai-icon='translate']")).not.toBeNull();
+
+    document.querySelector("#left")?.append(
+      Object.assign(document.createElement("p"), {
+        textContent: "This left paragraph appears after pause and should remain original."
+      })
+    );
+    await Promise.resolve();
+    vi.advanceTimersByTime(650);
+    await flushPromises();
+
+    expect(document.querySelector("#left p:last-child")?.textContent).toBe(
+      "This left paragraph appears after pause and should remain original."
+    );
+  });
+
+  it("translates a short picked region instead of rejecting it as too short", async () => {
+    await loadContentScript();
+    document.body.innerHTML = `
+      <main>
+        <section id="short"><p>Hello world.</p></section>
+      </main>
+    `;
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+
+    document.querySelector<HTMLButtonElement>("[data-translate-ai-quick-action='true']")?.click();
+    document.querySelector<HTMLButtonElement>("[data-translate-ai-menu-action='pick-region']")?.click();
+    document.querySelector<HTMLElement>("#short")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flushPromises();
+
+    expect(document.querySelector("#short p")?.textContent).toBe("vi:Hello world.");
+    expect(sentMessages).not.toContainEqual({
+      type: "SET_TAB_STATUS",
+      status: { status: "not-needed", message: "Not enough text to detect" }
+    });
+  });
+
+  it("detects the nearest text region when picking an empty child inside a region", async () => {
+    await loadContentScript();
+    document.body.innerHTML = `
+      <main>
+        <section id="card">
+          <div id="empty-child"></div>
+          <p>This card paragraph should translate when selecting the card area.</p>
+        </section>
+      </main>
+    `;
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+
+    document.querySelector<HTMLButtonElement>("[data-translate-ai-quick-action='true']")?.click();
+    document.querySelector<HTMLButtonElement>("[data-translate-ai-menu-action='pick-region']")?.click();
+    document.querySelector<HTMLElement>("#empty-child")?.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    document.querySelector<HTMLElement>("#empty-child")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flushPromises();
+
+    expect(document.querySelector("#card p")?.textContent).toBe(
+      "vi:This card paragraph should translate when selecting the card area."
+    );
+  });
+
+  it("expands picked inline text to the nearest readable container", async () => {
+    await loadContentScript();
+    document.body.innerHTML = `
+      <main>
+        <section id="card">
+          <p id="copy"><span id="word">This</span> paragraph should translate as one context.</p>
+        </section>
+      </main>
+    `;
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+
+    document.querySelector<HTMLButtonElement>("[data-translate-ai-quick-action='true']")?.click();
+    document.querySelector<HTMLButtonElement>("[data-translate-ai-menu-action='pick-region']")?.click();
+    document.querySelector<HTMLElement>("#word")?.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    document.querySelector<HTMLElement>("#word")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flushPromises();
+
+    expect(document.querySelector("#copy")?.textContent).toBe(
+      "vi:This vi:paragraph should translate as one context."
+    );
+  });
+
+  it("does not auto translate when the content script loads", async () => {
+    document.body.innerHTML = "<main><p>This paragraph has enough English text for page translation.</p></main>";
+
+    await loadContentScript();
+    await flushPromises();
+
+    expect(document.querySelector("p")?.textContent).toBe(
+      "This paragraph has enough English text for page translation."
+    );
+    expect(sentMessages.some((message) => (message as { type?: string }).type === "TRANSLATE_ITEMS")).toBe(false);
+  });
+
+  it("does not resend text nodes that were already translated", async () => {
+    const translatedItems: { id: string; text: string }[][] = [];
+    messageHandlers.TRANSLATE_ITEMS = (message) => {
+      translatedItems.push(message.items ?? []);
+      return {
+        items: message.items?.map((item) => ({ id: item.id, text: `vi:${item.text}` })) ?? []
+      };
+    };
+    await loadContentScript();
+    document.body.innerHTML = "<main><p>This paragraph has enough English text for page translation.</p></main>";
+
+    await expect(sendContentMessage({ type: "MANUAL_TRANSLATE_PAGE" })).resolves.toEqual({ ok: true });
+    await flushPromises();
+    await expect(sendContentMessage({ type: "MANUAL_TRANSLATE_PAGE" })).resolves.toEqual({ ok: true });
+    await flushPromises();
+
+    expect(translatedItems).toHaveLength(1);
+  });
+
+  it("acknowledges page translation commands and reports background translation failures through tab status", async () => {
+    messageHandlers.TRANSLATE_ITEMS = () => ({ error: "translation failed" });
+    await loadContentScript();
+    document.body.innerHTML = "<main><p>This paragraph has enough English text for page translation.</p></main>";
+
+    await expect(sendContentMessage({ type: "MANUAL_TRANSLATE_PAGE" })).resolves.toEqual({ ok: true });
+    await flushPromises();
+    expect(sentMessages).toContainEqual({
+      type: "SET_TAB_STATUS",
+      status: { status: "error", message: "translation failed" }
+    });
   });
 
   it("shows an error panel when selection translation fails in the background", async () => {
@@ -185,6 +553,38 @@ describe("content script", () => {
     expect(document.querySelector("p")?.textContent).toContain("Xin chao the gioi");
   });
 
+  it("schedules page text translation in batches of at most ten blocks", async () => {
+    const translatedItems: { id: string; text: string }[][] = [];
+    messageHandlers.TRANSLATE_ITEMS = (message) => {
+      translatedItems.push(message.items ?? []);
+      return {
+        items: message.items?.map((item) => ({ id: item.id, text: `vi:${item.text}` })) ?? []
+      };
+    };
+    await loadContentScript();
+    document.body.innerHTML = `
+      <main>
+        ${Array.from({ length: 16 }, (_, index) => `<p>This paragraph number ${index + 1} should be translated.</p>`).join("")}
+      </main>
+    `;
+
+    await expect(sendContentMessage({ type: "MANUAL_TRANSLATE_PAGE" })).resolves.toEqual({ ok: true });
+    await waitForScheduledBatch();
+
+    expect(translatedItems).toHaveLength(2);
+    expect(translatedItems[0]).toHaveLength(10);
+    expect(translatedItems[1].map((item) => item.text)).toEqual([
+      "This paragraph number 11 should be translated.",
+      "This paragraph number 12 should be translated.",
+      "This paragraph number 13 should be translated.",
+      "This paragraph number 14 should be translated.",
+      "This paragraph number 15 should be translated.",
+      "This paragraph number 16 should be translated."
+    ]);
+    expect(document.querySelectorAll("p")[0].textContent).toBe("vi:This paragraph number 1 should be translated.");
+    expect(document.querySelectorAll("p")[15].textContent).toBe("vi:This paragraph number 16 should be translated.");
+  });
+
   it("restores text by node identity after new text nodes are inserted between translations", async () => {
     await loadContentScript();
     document.body.innerHTML = "<main><p>This paragraph has enough English text for page translation.</p></main>";
@@ -202,14 +602,15 @@ describe("content script", () => {
     );
   });
 
-  it("shows a translation overlay for selected text", async () => {
+  it("replaces selected text with its translation", async () => {
     vi.useFakeTimers();
     await loadContentScript();
-    document.body.innerHTML = "<main><p>Hello world selection text.</p></main>";
+    document.body.innerHTML = "<main><p>Hello world selection text. Keep this sentence.</p></main>";
 
     const textNode = document.querySelector("p")!.firstChild!;
     const range = document.createRange();
-    range.selectNodeContents(textNode);
+    range.setStart(textNode, 0);
+    range.setEnd(textNode, "Hello world selection text.".length);
     window.getSelection()?.removeAllRanges();
     window.getSelection()?.addRange(range);
 
@@ -222,8 +623,9 @@ describe("content script", () => {
     button?.click();
     await flushPromises();
 
-    const panel = document.querySelector<HTMLDivElement>("div[data-translate-ai-ui='true']");
-    expect(panel?.textContent).toBe("Xin chao");
+    const panel = document.querySelector<HTMLDivElement>("[data-translate-ai-selection-panel='true']");
+    expect(panel).toBeNull();
+    expect(document.querySelector("p")?.textContent).toBe("Xin chao Keep this sentence.");
     expect(sentMessages).toContainEqual({ type: "TRANSLATE_SELECTION", text: "Hello world selection text." });
   });
 });

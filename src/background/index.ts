@@ -1,5 +1,5 @@
 import { chunkTextItems } from "../shared/chunking";
-import { analyzeLanguage, translateItems, translateSelection } from "../shared/ollama";
+import { analyzeLanguage, translateItems, translateSelection } from "../shared/ai";
 import { getSettings, saveSettings } from "../shared/settings";
 import type { RuntimeMessage, TabStatus, TextItem } from "../shared/types";
 
@@ -20,6 +20,10 @@ function getErrorMessage(error: unknown): string {
 
 function getSessionStorage(): chrome.storage.StorageArea | undefined {
   return chrome.storage?.session;
+}
+
+function logBackgroundDebug(message: string, data?: unknown): void {
+  console.debug(`[Translate AI][background] ${message}`, data ?? "");
 }
 
 async function getTabStatus(tabId: number): Promise<TabStatus> {
@@ -69,6 +73,16 @@ async function handleMessage(message: RuntimeMessage, sender: chrome.runtime.Mes
 
   const settings = await getSettings();
   const tabId = getSenderTabId(sender);
+  logBackgroundDebug("message", {
+    type: message.type,
+    tabId,
+    provider: settings.apiProvider,
+    baseUrl: settings.openaiBaseUrl,
+    model: settings.openaiModel,
+    itemCount: "items" in message ? message.items.length : undefined,
+    sampleChars: "sample" in message ? message.sample.length : undefined,
+    textChars: "text" in message ? message.text.length : undefined
+  });
 
   if (message.type === "ANALYZE_PAGE") {
     try {
@@ -93,12 +107,30 @@ async function handleMessage(message: RuntimeMessage, sender: chrome.runtime.Mes
   if (message.type === "TRANSLATE_ITEMS") {
     try {
       const chunks = chunkTextItems(message.items, 5000);
+      logBackgroundDebug("translate-items:start", {
+        tabId,
+        itemCount: message.items.length,
+        chunkCount: chunks.length,
+        totalChars: message.items.reduce((sum, item) => sum + item.text.length, 0)
+      });
       const translated: TextItem[] = [];
       for (let index = 0; index < chunks.length; index += 1) {
+        logBackgroundDebug("translate-items:chunk:start", {
+          tabId,
+          chunkIndex: index + 1,
+          chunkCount: chunks.length,
+          itemCount: chunks[index].length,
+          chars: chunks[index].reduce((sum, item) => sum + item.text.length, 0)
+        });
         if (tabId !== undefined) {
           await setTabStatus(tabId, { status: "translating", progress: { done: index, total: chunks.length } });
         }
         translated.push(...(await translateItems(settings, chunks[index])));
+        logBackgroundDebug("translate-items:chunk:done", {
+          tabId,
+          chunkIndex: index + 1,
+          chunkCount: chunks.length
+        });
       }
       if (tabId !== undefined) {
         await setTabStatus(tabId, { status: "translated", progress: { done: chunks.length, total: chunks.length } });

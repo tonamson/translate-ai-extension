@@ -30,4 +30,20 @@ describe("collectVisibleTextNodes", () => {
     const items = collectVisibleTextNodes(document.body);
     expect(items.map((item) => item.text)).toEqual(["Visible text"]);
   });
+
+  it("skips icon and accessibility helper text", () => {
+    document.body.innerHTML = `
+      <main>
+        <button aria-label="Open menu">☰</button>
+        <span class="material-icons">home</span>
+        <span role="img" aria-label="Search">🔍</span>
+        <img alt="Company logo">
+        <p title="tooltip">Real paragraph text worth translating.</p>
+        <p>?</p>
+      </main>
+    `;
+
+    const items = collectVisibleTextNodes(document.body);
+    expect(items.map((item) => item.text)).toEqual(["Real paragraph text worth translating."]);
+  });
 });

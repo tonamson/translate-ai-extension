@@ -1,7 +1,18 @@
 import type { ExtensionSettings, PageAnalysis, TextItem } from "./types";
 
-type OllamaGenerateResponse = {
-  response?: string;
+type ChatCompletionResponse = {
+  choices?: Array<{
+    message?: {
+      content?: string;
+    };
+  }>;
+};
+
+type AnthropicMessagesResponse = {
+  content?: Array<{
+    type?: string;
+    text?: string;
+  }>;
 };
 
 type SelectionTranslationResponse = {
@@ -109,28 +120,118 @@ function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-async function generateText(settings: ExtensionSettings, prompt: string): Promise<string> {
-  const response = await fetch(`${settings.ollamaEndpoint}/api/generate`, {
+function requireModel(settings: ExtensionSettings): string {
+  const model = settings.openaiModel.trim();
+  if (!model) {
+    throw new Error("AI model is required");
+  }
+
+  return model;
+}
+
+function logAiDebug(message: string, data?: unknown): void {
+  console.debug(`[Translate AI][api] ${message}`, data ?? "");
+}
+
+async function generateOpenAiCompatibleText(settings: ExtensionSettings, prompt: string): Promise<string> {
+  const endpoint = settings.openaiBaseUrl.replace(/\/$/, "");
+  const model = requireModel(settings);
+  const url = `${endpoint}/chat/completions`;
+  const startedAt = Date.now();
+
+  logAiDebug("request:start", {
+    provider: settings.apiProvider,
+    url,
+    model,
+    promptChars: prompt.length
+  });
+
+  const response = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Authorization": `Bearer ${settings.openaiApiKey}`,
+      "Content-Type": "application/json"
+    },
     body: JSON.stringify({
-      model: settings.ollamaModel,
-      prompt,
-      stream: false,
-      format: "json"
+      model,
+      messages: [{ role: "user", content: prompt }],
+      stream: false
     })
   });
 
+  logAiDebug("request:response", {
+    provider: settings.apiProvider,
+    url,
+    status: response.status,
+    ok: response.ok,
+    elapsedMs: Date.now() - startedAt
+  });
+
   if (!response.ok) {
-    throw new Error(`Ollama request failed: ${response.status}`);
+    throw new Error(`AI request failed: ${response.status}`);
   }
 
-  const data = (await response.json()) as OllamaGenerateResponse;
-  if (!data.response) {
-    throw new Error("Ollama response was empty");
+  const data = (await response.json()) as ChatCompletionResponse;
+  const content = data.choices?.[0]?.message?.content;
+  if (!content) {
+    throw new Error("AI response was empty");
   }
 
-  return data.response;
+  return content;
+}
+
+async function generateAnthropicText(settings: ExtensionSettings, prompt: string): Promise<string> {
+  const endpoint = settings.openaiBaseUrl.replace(/\/$/, "");
+  const model = requireModel(settings);
+  const url = `${endpoint}/messages`;
+  const startedAt = Date.now();
+
+  logAiDebug("request:start", {
+    provider: settings.apiProvider,
+    url,
+    model,
+    promptChars: prompt.length
+  });
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "x-api-key": settings.openaiApiKey,
+      "anthropic-version": "2023-06-01",
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 4096,
+      messages: [{ role: "user", content: prompt }]
+    })
+  });
+
+  logAiDebug("request:response", {
+    provider: settings.apiProvider,
+    url,
+    status: response.status,
+    ok: response.ok,
+    elapsedMs: Date.now() - startedAt
+  });
+
+  if (!response.ok) {
+    throw new Error(`AI request failed: ${response.status}`);
+  }
+
+  const data = (await response.json()) as AnthropicMessagesResponse;
+  const content = data.content?.find((item) => item.type === "text" && item.text)?.text;
+  if (!content) {
+    throw new Error("AI response was empty");
+  }
+
+  return content;
+}
+
+async function generateText(settings: ExtensionSettings, prompt: string): Promise<string> {
+  return settings.apiProvider === "anthropic"
+    ? generateAnthropicText(settings, prompt)
+    : generateOpenAiCompatibleText(settings, prompt);
 }
 
 function parseAndValidateJson<T>(text: string, validator: Validator<T>, validationError: string): T {

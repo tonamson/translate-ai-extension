@@ -12,11 +12,15 @@ export type TextItem = {
   text: string;
 };
 
+export type ApiProvider = "openai-compatible" | "anthropic";
+
 export type ExtensionSettings = {
   targetLanguage: string;
   autoTranslate: boolean;
-  ollamaEndpoint: string;
-  ollamaModel: string;
+  apiProvider: ApiProvider;
+  openaiBaseUrl: string;
+  openaiModel: string;
+  openaiApiKey: string;
 };
 
 export type PageAnalysis = {

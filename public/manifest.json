@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
   "name": "Local AI Page Translator",
-  "description": "Translate web pages with a local Ollama model.",
+  "description": "Translate web pages with a StepFun-compatible AI model.",
   "version": "0.1.0",
   "permissions": ["activeTab", "storage", "scripting"],
-  "host_permissions": ["http://localhost/*", "http://127.0.0.1/*"],
+  "host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
   "action": {
     "default_title": "Local AI Translator",
     "default_popup": "src/popup/index.html"

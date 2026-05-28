@@ -11,14 +11,36 @@ describe("normalizeSettings", () => {
       normalizeSettings({
         targetLanguage: "Japanese",
         autoTranslate: false,
-        ollamaEndpoint: "http://example.test:11434",
-        ollamaModel: "mistral"
+        apiProvider: "anthropic",
+        openaiBaseUrl: "https://api.example.test/v1",
+        openaiModel: "example-model",
+        openaiApiKey: "test-key"
       })
     ).toEqual({
       targetLanguage: "Japanese",
       autoTranslate: false,
-      ollamaEndpoint: "http://example.test:11434",
-      ollamaModel: "mistral"
+      apiProvider: "anthropic",
+      openaiBaseUrl: "https://api.example.test/v1",
+      openaiModel: "example-model",
+      openaiApiKey: "test-key"
+    });
+  });
+
+  it("migrates legacy ollama-named provider settings", () => {
+    expect(
+      normalizeSettings({
+        targetLanguage: "Japanese",
+        autoTranslate: false,
+        ollamaEndpoint: "http://legacy.test:11434",
+        ollamaModel: "legacy-model"
+      })
+    ).toEqual({
+      targetLanguage: "Japanese",
+      autoTranslate: false,
+      apiProvider: "openai-compatible",
+      openaiBaseUrl: "http://legacy.test:11434",
+      openaiModel: "legacy-model",
+      openaiApiKey: "123456"
     });
   });
 
@@ -27,8 +49,9 @@ describe("normalizeSettings", () => {
       normalizeSettings({
         targetLanguage: 123,
         autoTranslate: "yes",
-        ollamaEndpoint: null,
-        ollamaModel: ["llama3.1"]
+        openaiBaseUrl: null,
+        openaiModel: ["example-model"],
+        openaiApiKey: 123
       })
     ).toEqual(DEFAULT_SETTINGS);
   });
@@ -40,8 +63,9 @@ describe("getSettings", () => {
       translateAiSettings: {
         targetLanguage: "Korean",
         autoTranslate: "false",
-        ollamaEndpoint: "http://remote.test:11434",
-        ollamaModel: undefined
+        openaiBaseUrl: "https://remote.test/v1",
+        openaiModel: undefined,
+        openaiApiKey: undefined
       }
     });
 
@@ -56,7 +80,7 @@ describe("getSettings", () => {
     await expect(getSettings()).resolves.toEqual({
       ...DEFAULT_SETTINGS,
       targetLanguage: "Korean",
-      ollamaEndpoint: "http://remote.test:11434"
+      openaiBaseUrl: "https://remote.test/v1"
     });
     expect(get).toHaveBeenCalledWith("translateAiSettings");
   });

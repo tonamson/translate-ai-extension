@@ -1,13 +1,12 @@
-# Local AI Page Translator
+# AI Page Translator
 
-Chrome Manifest V3 extension for translating web pages with local Ollama.
+Chrome Manifest V3 extension for translating web pages with an OpenAI-compatible API.
 
 ## Requirements
 
 - Node.js 20+
 - Chrome or Chromium
-- Ollama running locally
-- The configured model installed, default `llama3.1`
+- OpenAI-compatible API access
 
 ## Development
 
@@ -20,10 +19,10 @@ npm run build
 
 Load `dist/` as an unpacked extension in Chrome.
 
-## Ollama
+## OpenAI-Compatible API
 
-Default endpoint: `http://localhost:11434`
+Default endpoint: `https://api.stepfun.ai/v1`
 
-Default model: `llama3.1`
+Model: enter the model required by your OpenAI-compatible provider.
 
-If Chrome cannot reach Ollama, start Ollama with an origin configuration that allows Chrome extension requests.
+Default development API key: `123456`. Change the base URL, model, and key from the extension popup.

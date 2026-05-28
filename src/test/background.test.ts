@@ -11,7 +11,7 @@ vi.mock("../shared/settings", () => ({
   saveSettings: vi.fn()
 }));
 
-vi.mock("../shared/ollama", () => ({
+vi.mock("../shared/ai", () => ({
   analyzeLanguage: mockAnalyzeLanguage,
   translateItems: mockTranslateItems,
   translateSelection: mockTranslateSelection
@@ -33,8 +33,10 @@ type TabUpdatedListener = (
 const settings = {
   targetLanguage: "Vietnamese",
   autoTranslate: true,
-  ollamaEndpoint: "http://localhost:11434",
-  ollamaModel: "llama3"
+  apiProvider: "openai-compatible",
+  openaiBaseUrl: "https://api.stepfun.ai/v1",
+  openaiModel: "example-model",
+  openaiApiKey: "123456"
 };
 
 let runtimeListener: RuntimeListener;
@@ -112,29 +114,29 @@ afterEach(() => {
 
 describe("background tab status", () => {
   it("sets sender tab status to error when page analysis fails", async () => {
-    mockAnalyzeLanguage.mockRejectedValue(new Error("Ollama request failed: 503"));
+    mockAnalyzeLanguage.mockRejectedValue(new Error("AI request failed: 503"));
     await loadBackground();
 
     await expect(sendMessage({ type: "ANALYZE_PAGE", sample: "Hello" }, { tab: { id: 7 } as chrome.tabs.Tab }))
-      .resolves.toEqual({ error: "Ollama request failed: 503" });
+      .resolves.toEqual({ error: "AI request failed: 503" });
 
     await expect(sendMessage({ type: "GET_TAB_STATUS", tabId: 7 })).resolves.toEqual({
       status: "error",
-      message: "Ollama request failed: 503"
+      message: "AI request failed: 503"
     });
   });
 
   it("sets sender tab status to error when item translation fails", async () => {
-    mockTranslateItems.mockRejectedValue(new Error("Ollama request failed: 500"));
+    mockTranslateItems.mockRejectedValue(new Error("AI request failed: 500"));
     await loadBackground();
 
     await expect(
       sendMessage({ type: "TRANSLATE_ITEMS", items: [{ id: "a", text: "Hello" }] }, { tab: { id: 9 } as chrome.tabs.Tab })
-    ).resolves.toEqual({ error: "Ollama request failed: 500" });
+    ).resolves.toEqual({ error: "AI request failed: 500" });
 
     await expect(sendMessage({ type: "GET_TAB_STATUS", tabId: 9 })).resolves.toEqual({
       status: "error",
-      message: "Ollama request failed: 500"
+      message: "AI request failed: 500"
     });
   });
 

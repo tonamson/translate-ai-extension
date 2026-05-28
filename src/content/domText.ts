@@ -4,16 +4,24 @@ export type CollectedTextNode = TextItem & {
   node: Text;
 };
 
-const SKIP_TAGS = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEXTAREA", "INPUT", "SELECT", "OPTION"]);
+const SKIP_TAGS = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEXTAREA", "INPUT", "SELECT", "OPTION", "SVG"]);
+const ICON_CLASS_PATTERN = /(^|\s)(material-icons|material-symbols[^ ]*|icon|fa|fas|far|fab)(\s|$)/i;
 
 function shouldSkipElement(element: Element): boolean {
   if (SKIP_TAGS.has(element.tagName)) return true;
   if (element.getAttribute("data-translate-ai-ui") === "true") return true;
   if (element.hasAttribute("hidden")) return true;
   if (element.getAttribute("aria-hidden") === "true") return true;
+  if (element.getAttribute("role") === "img" || element.getAttribute("role") === "presentation") return true;
+  if (element.tagName === "BUTTON" && element.hasAttribute("aria-label")) return true;
+  if (ICON_CLASS_PATTERN.test(element.className)) return true;
 
   const style = window.getComputedStyle(element);
   return style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse";
+}
+
+function looksLikeUiGlyph(text: string): boolean {
+  return text.length <= 1 || /^[^\p{L}\p{N}]+$/u.test(text);
 }
 
 function hasSkippedAncestor(element: Element, root: ParentNode): boolean {
@@ -34,7 +42,7 @@ export function collectVisibleTextNodes(root: ParentNode = document.body): Colle
       const text = node.textContent?.replace(/\s+/g, " ").trim();
       const parent = node.parentElement;
 
-      if (!text || !parent || hasSkippedAncestor(parent, root)) {
+      if (!text || looksLikeUiGlyph(text) || !parent || hasSkippedAncestor(parent, root)) {
         return NodeFilter.FILTER_REJECT;
       }
 
