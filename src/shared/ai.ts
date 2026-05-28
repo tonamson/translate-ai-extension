@@ -137,95 +137,123 @@ async function generateOpenAiCompatibleText(settings: ExtensionSettings, prompt:
   const endpoint = settings.openaiBaseUrl.replace(/\/$/, "");
   const model = requireModel(settings);
   const url = `${endpoint}/chat/completions`;
-  const startedAt = Date.now();
+  const reasoningEfforts: Array<"none" | "minimal" | undefined> = ["none", "minimal", undefined];
 
-  logAiDebug("request:start", {
-    provider: settings.apiProvider,
-    url,
-    model,
-    promptChars: prompt.length
-  });
-
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${settings.openaiApiKey}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
+  for (const reasoningEffort of reasoningEfforts) {
+    const startedAt = Date.now();
+    const body = {
       model,
       messages: [{ role: "user", content: prompt }],
-      stream: false
-    })
-  });
+      stream: false,
+      ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {})
+    };
 
-  logAiDebug("request:response", {
-    provider: settings.apiProvider,
-    url,
-    status: response.status,
-    ok: response.ok,
-    elapsedMs: Date.now() - startedAt
-  });
+    logAiDebug("request:start", {
+      provider: settings.apiProvider,
+      url,
+      model,
+      promptChars: prompt.length,
+      reasoningEffort: reasoningEffort ?? "omitted"
+    });
 
-  if (!response.ok) {
-    throw new Error(`AI request failed: ${response.status}`);
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${settings.openaiApiKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+
+    logAiDebug("request:response", {
+      provider: settings.apiProvider,
+      url,
+      status: response.status,
+      ok: response.ok,
+      elapsedMs: Date.now() - startedAt,
+      reasoningEffort: reasoningEffort ?? "omitted"
+    });
+
+    if (!response.ok) {
+      if ((response.status === 400 || response.status === 422) && reasoningEffort !== undefined) {
+        logAiDebug("request:retry-with-lower-reasoning", { status: response.status });
+        continue;
+      }
+      throw new Error(`AI request failed: ${response.status}`);
+    }
+
+    const data = (await response.json()) as ChatCompletionResponse;
+    const content = data.choices?.[0]?.message?.content;
+    if (!content) {
+      throw new Error("AI response was empty");
+    }
+
+    return content;
   }
 
-  const data = (await response.json()) as ChatCompletionResponse;
-  const content = data.choices?.[0]?.message?.content;
-  if (!content) {
-    throw new Error("AI response was empty");
-  }
-
-  return content;
+  throw new Error("AI request failed");
 }
 
 async function generateAnthropicText(settings: ExtensionSettings, prompt: string): Promise<string> {
   const endpoint = settings.openaiBaseUrl.replace(/\/$/, "");
   const model = requireModel(settings);
   const url = `${endpoint}/messages`;
-  const startedAt = Date.now();
+  const thinkingModes: Array<"disabled" | undefined> = ["disabled", undefined];
 
-  logAiDebug("request:start", {
-    provider: settings.apiProvider,
-    url,
-    model,
-    promptChars: prompt.length
-  });
-
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "x-api-key": settings.openaiApiKey,
-      "anthropic-version": "2023-06-01",
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
+  for (const thinkingMode of thinkingModes) {
+    const startedAt = Date.now();
+    const body = {
       model,
       max_tokens: 4096,
-      messages: [{ role: "user", content: prompt }]
-    })
-  });
+      messages: [{ role: "user", content: prompt }],
+      ...(thinkingMode ? { thinking: { type: thinkingMode } } : {})
+    };
 
-  logAiDebug("request:response", {
-    provider: settings.apiProvider,
-    url,
-    status: response.status,
-    ok: response.ok,
-    elapsedMs: Date.now() - startedAt
-  });
+    logAiDebug("request:start", {
+      provider: settings.apiProvider,
+      url,
+      model,
+      promptChars: prompt.length,
+      thinking: thinkingMode ?? "omitted"
+    });
 
-  if (!response.ok) {
-    throw new Error(`AI request failed: ${response.status}`);
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "x-api-key": settings.openaiApiKey,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+
+    logAiDebug("request:response", {
+      provider: settings.apiProvider,
+      url,
+      status: response.status,
+      ok: response.ok,
+      elapsedMs: Date.now() - startedAt,
+      thinking: thinkingMode ?? "omitted"
+    });
+
+    if (!response.ok) {
+      if ((response.status === 400 || response.status === 422) && thinkingMode !== undefined) {
+        logAiDebug("request:retry-with-thinking-omitted", { status: response.status });
+        continue;
+      }
+      throw new Error(`AI request failed: ${response.status}`);
+    }
+
+    const data = (await response.json()) as AnthropicMessagesResponse;
+    const content = data.content?.find((item) => item.type === "text" && item.text)?.text;
+    if (!content) {
+      throw new Error("AI response was empty");
+    }
+
+    return content;
   }
 
-  const data = (await response.json()) as AnthropicMessagesResponse;
-  const content = data.content?.find((item) => item.type === "text" && item.text)?.text;
-  if (!content) {
-    throw new Error("AI response was empty");
-  }
-
-  return content;
+  throw new Error("AI request failed");
 }
 
 async function generateText(settings: ExtensionSettings, prompt: string): Promise<string> {

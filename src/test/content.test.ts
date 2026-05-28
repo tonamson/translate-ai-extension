@@ -25,6 +25,7 @@ function installChromeMock() {
 
   vi.stubGlobal("chrome", {
     runtime: {
+      getURL: vi.fn((path: string) => `chrome-extension://test/${path}`),
       sendMessage: vi.fn(async (message: { type: string; items?: { id: string; text: string }[] }) => {
         sentMessages.push(message);
 
@@ -279,6 +280,93 @@ describe("content script", () => {
     ]);
   });
 
+  it("schedules small lazy-loaded updates without waiting for five text blocks", async () => {
+    vi.useFakeTimers();
+    const translatedItems: { id: string; text: string }[][] = [];
+    messageHandlers.TRANSLATE_ITEMS = (message) => {
+      translatedItems.push(message.items ?? []);
+      return {
+        items: message.items?.map((item) => ({ id: item.id, text: `vi:${item.text}` })) ?? []
+      };
+    };
+    await loadContentScript();
+    document.body.innerHTML = "<main><section id=\"region\"><p>This original region text should translate first.</p></section></main>";
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+
+    document.querySelector<HTMLButtonElement>("[data-translate-ai-quick-action='true']")?.click();
+    document.querySelector<HTMLButtonElement>("[data-translate-ai-menu-action='pick-region']")?.click();
+    document.querySelector<HTMLElement>("#region")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flushPromises();
+
+    document.querySelector("#region")?.append(
+      Object.assign(document.createElement("p"), { textContent: "First small lazy paragraph should translate." }),
+      Object.assign(document.createElement("p"), { textContent: "Second small lazy paragraph should translate." })
+    );
+    await flushPromises();
+    expect(document.querySelector("[data-translate-ai-page-indicator='true']")?.textContent).toContain(
+      "Translating 1/1 (2 blocks)"
+    );
+    expect(document.querySelector<HTMLButtonElement>("[data-translate-ai-quick-action='true']")?.dataset.translateAiQuickState).toBe("queued");
+    expect(document.querySelector<HTMLButtonElement>("[data-translate-ai-quick-action='true']")?.dataset.translateAiQueuedBlocks).toBe("2");
+
+    vi.runOnlyPendingTimers();
+    await flushPromises();
+    expect(translatedItems).toHaveLength(2);
+    expect(translatedItems[1].map((item) => item.text)).toEqual([
+      "First small lazy paragraph should translate.",
+      "Second small lazy paragraph should translate."
+    ]);
+    expect(document.querySelector<HTMLButtonElement>("[data-translate-ai-quick-action='true']")?.dataset.translateAiQuickState).toBe("pause");
+    expect(document.querySelector<HTMLButtonElement>("[data-translate-ai-quick-action='true']")?.dataset.translateAiQueuedBlocks).toBe("0");
+  });
+
+  it("folds newly detected lazy-loaded blocks into the active translation progress", async () => {
+    const firstTranslation = createDeferred<{ items: { id: string; text: string }[] }>();
+    const translatedItems: { id: string; text: string }[][] = [];
+    messageHandlers.TRANSLATE_ITEMS = (message) => {
+      translatedItems.push(message.items ?? []);
+      if (translatedItems.length === 1) return firstTranslation.promise;
+      return {
+        items: message.items?.map((item) => ({ id: item.id, text: `vi:${item.text}` })) ?? []
+      };
+    };
+    await loadContentScript();
+    document.body.innerHTML = `
+      <main>
+        ${Array.from({ length: 10 }, (_, index) => `<p>Initial paragraph number ${index + 1} should be translated.</p>`).join("")}
+      </main>
+    `;
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+
+    document.querySelector<HTMLButtonElement>("[data-translate-ai-quick-action='true']")?.click();
+    document.querySelector<HTMLButtonElement>("[data-translate-ai-menu-action='watch-page']")?.click();
+    await flushPromises();
+    expect(document.querySelector("[data-translate-ai-page-indicator='true']")?.textContent).toContain(
+      "Translating 1/1 (10 blocks)"
+    );
+
+    document.querySelector("main")?.append(
+      ...Array.from({ length: 200 }, (_, index) =>
+        Object.assign(document.createElement("p"), {
+          textContent: `Lazy paragraph number ${index + 1} should be translated after the current batch.`
+        })
+      )
+    );
+    await flushPromises();
+
+    expect(document.querySelector("[data-translate-ai-page-indicator='true']")?.textContent).toContain(
+      "Translating 1/21 (210 blocks)"
+    );
+    expect(document.querySelector<HTMLButtonElement>("[data-translate-ai-quick-action='true']")?.dataset.translateAiQueuedBlocks).toBe("200");
+
+    window.dispatchEvent(new Event("pagehide"));
+    firstTranslation.resolve({
+      items: translatedItems[0].map((item) => ({ id: item.id, text: `vi:${item.text}` }))
+    });
+    await waitForScheduledBatch();
+    await flushPromises();
+  });
+
   it("translates new region content that appears while a previous region request is still running", async () => {
     vi.useFakeTimers();
     const firstTranslation = createDeferred<{ items: { id: string; text: string }[] }>();
@@ -311,6 +399,10 @@ describe("content script", () => {
     await Promise.resolve();
     vi.advanceTimersByTime(650);
     await flushPromises();
+    expect(document.querySelector("[data-translate-ai-page-indicator='true']")?.textContent).toContain(
+      "Translating 1/1 (2 blocks)"
+    );
+    expect(document.querySelector<HTMLButtonElement>("[data-translate-ai-quick-action='true']")?.dataset.translateAiQuickState).toBe("queued");
 
     firstTranslation.resolve({
       items: [{ id: "text-0", text: "vi:This original region text should translate first." }]
@@ -385,7 +477,8 @@ describe("content script", () => {
     );
 
     document.querySelector<HTMLButtonElement>("[data-translate-ai-quick-action='true']")?.click();
-    expect(document.querySelector("[data-translate-ai-icon='translate']")).not.toBeNull();
+    expect(document.querySelector("[data-translate-ai-quick-logo='true']")).not.toBeNull();
+    expect(document.querySelector<HTMLButtonElement>("[data-translate-ai-quick-action='true']")?.dataset.translateAiQuickState).toBe("translate");
 
     document.querySelector("#left")?.append(
       Object.assign(document.createElement("p"), {
