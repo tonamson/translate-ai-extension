@@ -55,6 +55,26 @@ describe("normalizeSettings", () => {
       })
     ).toEqual(DEFAULT_SETTINGS);
   });
+
+  it("falls back to OpenAI-compatible for unsupported provider values", () => {
+    expect(
+      normalizeSettings({
+        targetLanguage: "Vietnamese",
+        autoTranslate: false,
+        apiProvider: "unsupported",
+        openaiBaseUrl: "http://127.0.0.1:20128/v1",
+        openaiModel: "example-model",
+        openaiApiKey: "test-key"
+      })
+    ).toEqual({
+      targetLanguage: "Vietnamese",
+      autoTranslate: false,
+      apiProvider: "openai-compatible",
+      openaiBaseUrl: "http://127.0.0.1:20128/v1",
+      openaiModel: "example-model",
+      openaiApiKey: "test-key"
+    });
+  });
 });
 
 describe("getSettings", () => {

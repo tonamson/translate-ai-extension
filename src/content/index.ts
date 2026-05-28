@@ -4,23 +4,29 @@ import type { ExtensionSettings, PageAnalysis, TabStatus, TextItem } from "../sh
 
 const originals = new Map<Text, string>();
 const translatedNodes = new Set<Text>();
+const translatedTextByHash = new Map<string, { originalText: string; translatedText: string }>();
+const pendingTranslationNodesByHash = new Map<string, Set<Text>>();
 const MAX_TEXT_BLOCKS_PER_TRANSLATION_REQUEST = 10;
 const WATCH_SMALL_UPDATE_TEXT_BLOCK_LIMIT = 5;
 const WATCH_SMALL_UPDATE_DELAY_MS = 250;
 const WATCH_DEFAULT_UPDATE_DELAY_MS = 600;
+const MANUAL_COLLECT_RETRY_LIMIT = 4;
+const MANUAL_COLLECT_RETRY_DELAY_MS = 350;
+const QUICK_BUTTON_POSITION_STORAGE_KEY = "translateAiQuickButtonPosition";
+const QUICK_BUTTON_SIZE = 48;
+const QUICK_BUTTON_MARGIN = 16;
 let quickTranslateButton: HTMLButtonElement | null = null;
 let quickTranslateMenu: HTMLDivElement | null = null;
 let regionHighlight: HTMLDivElement | null = null;
-let selectionButton: HTMLButtonElement | null = null;
-let selectionPanel: HTMLDivElement | null = null;
 let pageTranslationIndicator: HTMLDivElement | null = null;
 let pageTranslationJob: Promise<void> | null = null;
+let pendingPageTranslationTimer: number | null = null;
 let continuousObserver: MutationObserver | null = null;
 let continuousTimer: number | null = null;
 let continuousRoot: ParentNode = document.body;
 let highlightedRegionElement: Element | null = null;
 let pendingContinuousTranslation = false;
-let queuedTranslationNodes = new Set<Text>();
+let queuedTranslationHashes = new Set<string>();
 let activeTranslationRunId = 0;
 const canceledTranslationRunIds = new Set<number>();
 let translationProgress = {
@@ -28,6 +34,23 @@ let translationProgress = {
   completedBlocks: 0,
   totalBlocks: 0
 };
+let activeTranslationSettingsSignature = "";
+
+type QuickButtonEdge = "left" | "right" | "top" | "bottom";
+
+type QuickButtonPosition = {
+  edge: QuickButtonEdge;
+  offset: number;
+};
+
+type QuickButtonDragState = {
+  pointerId: number;
+  dragging: boolean;
+};
+
+let quickButtonPosition: QuickButtonPosition | null = null;
+let quickButtonDragState: QuickButtonDragState | null = null;
+let suppressQuickButtonClick = false;
 
 type BackgroundErrorResponse = {
   error: string;
@@ -66,12 +89,223 @@ async function setTabStatus(status: TabStatus): Promise<void> {
   await sendMessage({ type: "SET_TAB_STATUS", status });
 }
 
+function wait(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function getDefaultQuickButtonPosition(): QuickButtonPosition {
+  return {
+    edge: "right",
+    offset: Math.max(QUICK_BUTTON_MARGIN, window.innerHeight - QUICK_BUTTON_SIZE - QUICK_BUTTON_MARGIN)
+  };
+}
+
+function isQuickButtonPosition(value: unknown): value is QuickButtonPosition {
+  if (typeof value !== "object" || value === null) return false;
+  const position = value as Partial<QuickButtonPosition>;
+  return (
+    (position.edge === "left" || position.edge === "right" || position.edge === "top" || position.edge === "bottom") &&
+    typeof position.offset === "number" &&
+    Number.isFinite(position.offset)
+  );
+}
+
+function applyQuickButtonPosition(position: QuickButtonPosition): void {
+  if (!quickTranslateButton) return;
+
+  const maxLeft = Math.max(QUICK_BUTTON_MARGIN, window.innerWidth - QUICK_BUTTON_SIZE - QUICK_BUTTON_MARGIN);
+  const maxTop = Math.max(QUICK_BUTTON_MARGIN, window.innerHeight - QUICK_BUTTON_SIZE - QUICK_BUTTON_MARGIN);
+  const offset = position.edge === "left" || position.edge === "right"
+    ? clampNumber(position.offset, QUICK_BUTTON_MARGIN, maxTop)
+    : clampNumber(position.offset, QUICK_BUTTON_MARGIN, maxLeft);
+
+  Object.assign(quickTranslateButton.style, {
+    left: "",
+    right: "",
+    top: "",
+    bottom: ""
+  });
+
+  if (position.edge === "left") {
+    quickTranslateButton.style.left = `${QUICK_BUTTON_MARGIN}px`;
+    quickTranslateButton.style.top = `${offset}px`;
+  } else if (position.edge === "right") {
+    quickTranslateButton.style.right = `${QUICK_BUTTON_MARGIN}px`;
+    quickTranslateButton.style.top = `${offset}px`;
+  } else if (position.edge === "top") {
+    quickTranslateButton.style.top = `${QUICK_BUTTON_MARGIN}px`;
+    quickTranslateButton.style.left = `${offset}px`;
+  } else {
+    quickTranslateButton.style.bottom = `${QUICK_BUTTON_MARGIN}px`;
+    quickTranslateButton.style.left = `${offset}px`;
+  }
+}
+
+function saveQuickButtonPosition(position: QuickButtonPosition): void {
+  quickButtonPosition = position;
+  void chrome.storage.local.set({ [QUICK_BUTTON_POSITION_STORAGE_KEY]: position }).catch(() => undefined);
+}
+
+async function restoreQuickButtonPosition(): Promise<void> {
+  try {
+    const stored = await chrome.storage.local.get(QUICK_BUTTON_POSITION_STORAGE_KEY);
+    const position = stored[QUICK_BUTTON_POSITION_STORAGE_KEY];
+    if (isQuickButtonPosition(position)) {
+      quickButtonPosition = position;
+      applyQuickButtonPosition(position);
+    }
+  } catch {
+    // Ignore storage failures; the button still works at the default position.
+  }
+}
+
+function getQuickButtonDragPosition(event: PointerEvent): { left: number; top: number } {
+  const maxLeft = Math.max(QUICK_BUTTON_MARGIN, window.innerWidth - QUICK_BUTTON_SIZE - QUICK_BUTTON_MARGIN);
+  const maxTop = Math.max(QUICK_BUTTON_MARGIN, window.innerHeight - QUICK_BUTTON_SIZE - QUICK_BUTTON_MARGIN);
+  return {
+    left: clampNumber(event.clientX - QUICK_BUTTON_SIZE / 2, QUICK_BUTTON_MARGIN, maxLeft),
+    top: clampNumber(event.clientY - QUICK_BUTTON_SIZE / 2, QUICK_BUTTON_MARGIN, maxTop)
+  };
+}
+
+function moveQuickButtonTo(left: number, top: number): void {
+  if (!quickTranslateButton) return;
+  Object.assign(quickTranslateButton.style, {
+    left: `${left}px`,
+    top: `${top}px`,
+    right: "",
+    bottom: ""
+  });
+}
+
+function getQuickButtonViewportBox(): { left: number; top: number; width: number; height: number } {
+  if (!quickTranslateButton) {
+    const fallback = getDefaultQuickButtonPosition();
+    return {
+      left: window.innerWidth - QUICK_BUTTON_SIZE - QUICK_BUTTON_MARGIN,
+      top: fallback.offset,
+      width: QUICK_BUTTON_SIZE,
+      height: QUICK_BUTTON_SIZE
+    };
+  }
+
+  const left = quickTranslateButton.style.left
+    ? Number.parseFloat(quickTranslateButton.style.left)
+    : window.innerWidth - Number.parseFloat(quickTranslateButton.style.right || `${QUICK_BUTTON_MARGIN}`) - QUICK_BUTTON_SIZE;
+  const top = quickTranslateButton.style.top
+    ? Number.parseFloat(quickTranslateButton.style.top)
+    : window.innerHeight - Number.parseFloat(quickTranslateButton.style.bottom || `${QUICK_BUTTON_MARGIN}`) - QUICK_BUTTON_SIZE;
+
+  return {
+    left,
+    top,
+    width: QUICK_BUTTON_SIZE,
+    height: QUICK_BUTTON_SIZE
+  };
+}
+
+function positionFloatingElementNearQuickButton(element: HTMLElement, preferredWidth: number): void {
+  const anchor = getQuickButtonViewportBox();
+  const gap = 8;
+  const maxLeft = Math.max(QUICK_BUTTON_MARGIN, window.innerWidth - preferredWidth - QUICK_BUTTON_MARGIN);
+  const left = clampNumber(anchor.left + anchor.width / 2 - preferredWidth / 2, QUICK_BUTTON_MARGIN, maxLeft);
+  const opensBelow = anchor.top + anchor.height / 2 < window.innerHeight / 2;
+  const top = opensBelow
+    ? anchor.top + anchor.height + gap
+    : Math.max(QUICK_BUTTON_MARGIN, anchor.top - gap - 160);
+
+  Object.assign(element.style, {
+    left: `${left}px`,
+    top: `${top}px`,
+    right: "",
+    bottom: ""
+  });
+}
+
+function snapQuickButtonToNearestEdge(left: number, top: number): QuickButtonPosition {
+  const centerX = left + QUICK_BUTTON_SIZE / 2;
+  const centerY = top + QUICK_BUTTON_SIZE / 2;
+  const distances: Record<QuickButtonEdge, number> = {
+    left: centerX,
+    right: window.innerWidth - centerX,
+    top: centerY,
+    bottom: window.innerHeight - centerY
+  };
+  const edge = (Object.keys(distances) as QuickButtonEdge[]).reduce((nearest, candidate) => {
+    return distances[candidate] < distances[nearest] ? candidate : nearest;
+  }, "right");
+
+  return {
+    edge,
+    offset: edge === "left" || edge === "right" ? top : left
+  };
+}
+
+function pruneDetachedTextState(): void {
+  for (const node of translatedNodes) {
+    if (!node.isConnected) translatedNodes.delete(node);
+  }
+  for (const node of originals.keys()) {
+    if (!node.isConnected) originals.delete(node);
+  }
+}
+
 function rememberOriginals(items: CollectedTextNode[]): void {
   for (const item of items) {
     if (!originals.has(item.node)) {
       originals.set(item.node, item.node.textContent ?? "");
     }
   }
+}
+
+function normalizeSourceText(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function hashTextBlock(text: string): string {
+  const normalizedText = normalizeSourceText(text);
+  let hash = 2166136261;
+  for (let index = 0; index < normalizedText.length; index += 1) {
+    hash ^= normalizedText.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${normalizedText.length}:${hash.toString(36)}`;
+}
+
+function getSettingsSignature(settings: ExtensionSettings): string {
+  return [
+    settings.targetLanguage,
+    settings.apiProvider,
+    settings.openaiBaseUrl,
+    settings.openaiModel
+  ].join("\u0000");
+}
+
+function syncTranslationCacheSettings(settings: ExtensionSettings): void {
+  const signature = getSettingsSignature(settings);
+  if (signature === activeTranslationSettingsSignature) return;
+
+  translatedTextByHash.clear();
+  pendingTranslationNodesByHash.clear();
+  queuedTranslationHashes.clear();
+  activeTranslationSettingsSignature = signature;
+}
+
+function rememberTranslatedText(sourceText: string, translatedText: string): void {
+  const originalText = normalizeSourceText(sourceText);
+  if (!originalText) return;
+  translatedTextByHash.set(hashTextBlock(sourceText), { originalText, translatedText });
+}
+
+function getCachedTranslatedText(sourceText: string): string | undefined {
+  const originalText = normalizeSourceText(sourceText);
+  const cached = translatedTextByHash.get(hashTextBlock(sourceText));
+  if (!cached || cached.originalText !== originalText) return undefined;
+  return cached.translatedText;
 }
 
 function replaceTextPreservingBoundaryWhitespace(node: Text, translated: string): void {
@@ -84,6 +318,39 @@ function replaceTextPreservingBoundaryWhitespace(node: Text, translated: string)
 function replaceNodeTranslation(node: Text, translated: string): void {
   replaceTextPreservingBoundaryWhitespace(node, translated);
   translatedNodes.add(node);
+}
+
+function replaceCachedNodeTranslation(item: CollectedTextNode, translated: string): void {
+  if (!originals.has(item.node)) {
+    originals.set(item.node, item.node.textContent ?? "");
+  }
+  replaceNodeTranslation(item.node, translated);
+}
+
+function trackPendingTranslationNode(hash: string, node: Text): void {
+  const nodes = pendingTranslationNodesByHash.get(hash) ?? new Set<Text>();
+  nodes.add(node);
+  pendingTranslationNodesByHash.set(hash, nodes);
+}
+
+function applyTranslationToPendingNodes(hash: string, translated: string): void {
+  const nodes = pendingTranslationNodesByHash.get(hash);
+  if (!nodes) return;
+
+  for (const node of nodes) {
+    if (!node.isConnected || translatedNodes.has(node)) continue;
+    if (!originals.has(node)) {
+      originals.set(node, node.textContent ?? "");
+    }
+    replaceNodeTranslation(node, translated);
+  }
+  pendingTranslationNodesByHash.delete(hash);
+}
+
+function clearPendingTranslationNodesForItems(items: CollectedTextNode[]): void {
+  for (const item of items) {
+    pendingTranslationNodesByHash.delete(hashTextBlock(item.text));
+  }
 }
 
 function shouldTranslatePage(settings: ExtensionSettings, analysis: PageAnalysis, force: boolean): boolean {
@@ -110,12 +377,29 @@ function cancelActiveTranslation(): void {
   logContentDebug("translate:cancel", { runId: activeTranslationRunId });
 }
 
+function restartActiveTranslationWithLatestSettings(): void {
+  if (!pageTranslationJob) return;
+
+  const restartRoot = continuousObserver ? continuousRoot : document.body;
+  canceledTranslationRunIds.add(activeTranslationRunId);
+  pendingTranslationNodesByHash.clear();
+  queuedTranslationHashes.clear();
+  pageTranslationJob = null;
+  quickTranslateButton?.removeAttribute("disabled");
+  showPageTranslationIndicator("Settings changed, restarting...");
+  logContentDebug("translate:restart-settings", {
+    runId: activeTranslationRunId,
+    root: restartRoot instanceof Element ? describeElement(restartRoot) : "document"
+  });
+  schedulePageTranslation({ force: true, root: restartRoot }, 0);
+}
+
 function getQueuedTranslationBlockCount(): number {
-  return queuedTranslationNodes.size;
+  return queuedTranslationHashes.size;
 }
 
 function resetQueuedTranslationState(): void {
-  queuedTranslationNodes = new Set<Text>();
+  queuedTranslationHashes = new Set<string>();
 }
 
 function resetTranslationProgress(): void {
@@ -160,8 +444,11 @@ function startOrExtendTranslationProgress(nodeCount: number, continuous: boolean
 function addQueuedNodesToTranslationProgress(nodes: CollectedTextNode[]): number {
   let addedBlocks = 0;
   for (const item of nodes) {
-    if (queuedTranslationNodes.has(item.node)) continue;
-    queuedTranslationNodes.add(item.node);
+    const hash = hashTextBlock(item.text);
+    if (queuedTranslationHashes.has(hash) || pendingTranslationNodesByHash.has(hash) || getCachedTranslatedText(item.text) !== undefined) {
+      continue;
+    }
+    queuedTranslationHashes.add(hash);
     addedBlocks += 1;
   }
   if (addedBlocks > 0) {
@@ -288,7 +575,49 @@ function showPageTranslationIndicator(message = "Preparing translation..."): voi
 }
 
 function collectUntranslatedTextNodes(root: ParentNode): CollectedTextNode[] {
-  return collectVisibleTextNodes(root).filter((item) => !translatedNodes.has(item.node));
+  pruneDetachedTextState();
+  return collectVisibleTextNodes(root).filter((item) => {
+    if (translatedNodes.has(item.node)) return false;
+
+    const hash = hashTextBlock(item.text);
+    const cachedTranslation = getCachedTranslatedText(item.text);
+    if (cachedTranslation !== undefined) {
+      replaceCachedNodeTranslation(item, cachedTranslation);
+      return false;
+    }
+
+    if (pendingTranslationNodesByHash.has(hash)) {
+      trackPendingTranslationNode(hash, item.node);
+      return false;
+    }
+
+    return true;
+  });
+}
+
+function prepareUniqueTextNodesForTranslation(nodes: CollectedTextNode[]): CollectedTextNode[] {
+  const uniqueNodes: CollectedTextNode[] = [];
+  const preparedHashes = new Set<string>();
+
+  for (const item of nodes) {
+    if (translatedNodes.has(item.node)) continue;
+
+    const hash = hashTextBlock(item.text);
+    const cachedTranslation = getCachedTranslatedText(item.text);
+    if (cachedTranslation !== undefined) {
+      replaceCachedNodeTranslation(item, cachedTranslation);
+      continue;
+    }
+
+    trackPendingTranslationNode(hash, item.node);
+    if (preparedHashes.has(hash)) continue;
+
+    preparedHashes.add(hash);
+    queuedTranslationHashes.delete(hash);
+    uniqueNodes.push(item);
+  }
+
+  return uniqueNodes;
 }
 
 function chunkCollectedTextNodes(items: CollectedTextNode[], maxItems: number): CollectedTextNode[][] {
@@ -303,13 +632,27 @@ function waitForNextTranslationBatch(): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, 0));
 }
 
+function clearPendingPageTranslationTimer(): void {
+  if (pendingPageTranslationTimer === null) return;
+  window.clearTimeout(pendingPageTranslationTimer);
+  pendingPageTranslationTimer = null;
+}
+
+function schedulePageTranslation(options: { force?: boolean; root?: ParentNode }, delay: number): void {
+  clearPendingPageTranslationTimer();
+  pendingPageTranslationTimer = window.setTimeout(() => {
+    pendingPageTranslationTimer = null;
+    startPageTranslation(options);
+  }, delay);
+}
+
 function isInsideTranslateAiUi(node: Node): boolean {
   const element = node instanceof Element ? node : node.parentElement;
   return element?.closest("[data-translate-ai-ui='true']") !== null;
 }
 
 function collectMutationTextNodes(records: MutationRecord[], root: ParentNode): CollectedTextNode[] {
-  const nodes = new Map<Text, CollectedTextNode>();
+  const nodes = new Map<string, CollectedTextNode>();
 
   for (const record of records) {
     if (isInsideTranslateAiUi(record.target)) continue;
@@ -319,7 +662,7 @@ function collectMutationTextNodes(records: MutationRecord[], root: ParentNode): 
       const parent = record.target.parentElement;
       if (parent && rootContainsNode(root, record.target)) {
         for (const item of collectUntranslatedTextNodes(parent)) {
-          nodes.set(item.node, item);
+          nodes.set(hashTextBlock(item.text), item);
         }
       }
       continue;
@@ -339,7 +682,7 @@ function collectMutationTextNodes(records: MutationRecord[], root: ParentNode): 
       if (!collectRoot) continue;
 
       for (const item of collectUntranslatedTextNodes(collectRoot)) {
-        nodes.set(item.node, item);
+        nodes.set(hashTextBlock(item.text), item);
       }
     }
   }
@@ -376,8 +719,15 @@ async function translatePage({
   showPageTranslationIndicator("Collecting text...");
   const settings = await sendMessage<ExtensionSettings>({ type: "GET_SETTINGS" });
   if (isTranslationRunCanceled(runId)) return;
+  syncTranslationCacheSettings(settings);
   const translationRoot = force ? resolveRootWithText(root) : root;
-  const nodes = collectUntranslatedTextNodes(translationRoot);
+  let nodes = collectUntranslatedTextNodes(translationRoot);
+  for (let retryIndex = 0; force && nodes.length === 0 && retryIndex < MANUAL_COLLECT_RETRY_LIMIT; retryIndex += 1) {
+    showPageTranslationIndicator(`Waiting for page text ${retryIndex + 1}/${MANUAL_COLLECT_RETRY_LIMIT}...`);
+    await wait(MANUAL_COLLECT_RETRY_DELAY_MS);
+    if (isTranslationRunCanceled(runId)) return;
+    nodes = collectUntranslatedTextNodes(translationRoot);
+  }
   const sample = createPageSample(nodes);
   logContentDebug("translate:collect", {
     force,
@@ -414,10 +764,17 @@ async function translatePage({
     }
   }
 
-  startOrExtendTranslationProgress(nodes.length, continuousObserver !== null);
-  rememberOriginals(nodes);
+  const translatableNodes = prepareUniqueTextNodesForTranslation(nodes);
+  if (translatableNodes.length === 0) {
+    logContentDebug("translate:skip", { reason: "already-queued-or-translated" });
+    if (!translationProgress.active) hidePageTranslationIndicator();
+    return;
+  }
+
+  startOrExtendTranslationProgress(translatableNodes.length, continuousObserver !== null);
+  rememberOriginals(translatableNodes);
   try {
-    const chunks = chunkCollectedTextNodes(nodes, MAX_TEXT_BLOCKS_PER_TRANSLATION_REQUEST);
+    const chunks = chunkCollectedTextNodes(translatableNodes, MAX_TEXT_BLOCKS_PER_TRANSLATION_REQUEST);
     for (let index = 0; index < chunks.length; index += 1) {
       if (isTranslationRunCanceled(runId)) return;
       const chunk = chunks[index];
@@ -429,11 +786,20 @@ async function translatePage({
         totalBlocks: translationProgress.totalBlocks,
         totalChars: chunk.reduce((sum, item) => sum + item.text.length, 0)
       });
-      const response = await sendMessage<{ items: TextItem[] }>({
-        type: "TRANSLATE_ITEMS",
-        items: chunk.map(({ id, text }) => ({ id, text }))
-      });
-      if (isTranslationRunCanceled(runId)) return;
+      let response: { items: TextItem[] };
+      try {
+        response = await sendMessage<{ items: TextItem[] }>({
+          type: "TRANSLATE_ITEMS",
+          items: chunk.map(({ id, text }) => ({ id, text }))
+        });
+      } catch (error) {
+        clearPendingTranslationNodesForItems(chunk);
+        throw error;
+      }
+      if (isTranslationRunCanceled(runId)) {
+        clearPendingTranslationNodesForItems(chunk);
+        return;
+      }
       logContentDebug("translate:response", {
         batchIndex: getCurrentTranslationBatch(chunk.length),
         batchCount: getTranslationBatchCount(),
@@ -442,7 +808,11 @@ async function translatePage({
       const translatedById = new Map(response.items.map((item) => [item.id, item.text]));
       for (const item of chunk) {
         const translated = translatedById.get(item.id);
-        if (translated !== undefined) replaceNodeTranslation(item.node, translated);
+        if (translated !== undefined) {
+          const hash = hashTextBlock(item.text);
+          rememberTranslatedText(item.text, translated);
+          applyTranslationToPendingNodes(hash, translated);
+        }
       }
       translationProgress.completedBlocks += chunk.length;
       if (index < chunks.length - 1) {
@@ -452,11 +822,13 @@ async function translatePage({
   } finally {
     logContentDebug("translate:done");
     if (isTranslationRunCanceled(runId)) {
-      resetTranslationProgress();
-      hidePageTranslationIndicator();
+      if (runId === activeTranslationRunId) {
+        resetTranslationProgress();
+        hidePageTranslationIndicator();
+      }
       return;
     }
-    const hasFollowUpWork = continuousObserver !== null && (pendingContinuousTranslation || queuedTranslationNodes.size > 0);
+    const hasFollowUpWork = continuousObserver !== null && (pendingContinuousTranslation || queuedTranslationHashes.size > 0);
     if (!hasFollowUpWork) {
       resetTranslationProgress();
       hidePageTranslationIndicator();
@@ -514,6 +886,53 @@ function createQuickTranslateLogo(): HTMLImageElement {
   return image;
 }
 
+function installQuickButtonDragHandlers(button: HTMLButtonElement): void {
+  button.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    quickButtonDragState = {
+      pointerId: event.pointerId,
+      dragging: false
+    };
+    button.setPointerCapture?.(event.pointerId);
+  });
+
+  button.addEventListener("pointermove", (event) => {
+    if (!quickButtonDragState || quickButtonDragState.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    const { left, top } = getQuickButtonDragPosition(event);
+    quickButtonDragState.dragging = true;
+    hideQuickTranslateMenu();
+    button.style.transition = "filter 160ms ease, box-shadow 160ms ease";
+    moveQuickButtonTo(left, top);
+  });
+
+  button.addEventListener("pointerup", (event) => {
+    if (!quickButtonDragState || quickButtonDragState.pointerId !== event.pointerId) return;
+    const wasDragging = quickButtonDragState.dragging;
+    quickButtonDragState = null;
+    button.releasePointerCapture?.(event.pointerId);
+    button.style.transition = "filter 160ms ease, box-shadow 160ms ease, transform 160ms ease";
+    if (!wasDragging) return;
+
+    event.preventDefault();
+    const { left, top } = getQuickButtonDragPosition(event);
+    const snappedPosition = snapQuickButtonToNearestEdge(left, top);
+    saveQuickButtonPosition(snappedPosition);
+    applyQuickButtonPosition(snappedPosition);
+    suppressQuickButtonClick = true;
+    window.setTimeout(() => {
+      suppressQuickButtonClick = false;
+    }, 0);
+  });
+
+  button.addEventListener("pointercancel", (event) => {
+    if (!quickButtonDragState || quickButtonDragState.pointerId !== event.pointerId) return;
+    quickButtonDragState = null;
+    button.style.transition = "filter 160ms ease, box-shadow 160ms ease, transform 160ms ease";
+    applyQuickButtonPosition(quickButtonPosition ?? getDefaultQuickButtonPosition());
+  });
+}
+
 function startPageTranslation(options: { force?: boolean; root?: ParentNode } = {}): void {
   if (pageTranslationJob) {
     if (continuousObserver) {
@@ -558,7 +977,7 @@ function startPageTranslation(options: { force?: boolean; root?: ParentNode } = 
           root: continuousRoot instanceof Element ? describeElement(continuousRoot) : "document"
         });
         updateTranslationProgressUi();
-        window.setTimeout(() => startPageTranslation({ force: true, root: continuousRoot }), 0);
+        schedulePageTranslation({ force: true, root: continuousRoot }, 0);
       }
     });
 }
@@ -595,6 +1014,14 @@ function scheduleContinuousTranslation(newTextNodes: CollectedTextNode[] = []): 
 }
 
 function stopContinuousTranslation(): void {
+  clearPendingPageTranslationTimer();
+  if (pageTranslationJob) {
+    canceledTranslationRunIds.add(activeTranslationRunId);
+    pageTranslationJob = null;
+  }
+  translatedTextByHash.clear();
+  pendingTranslationNodesByHash.clear();
+  activeTranslationSettingsSignature = "";
   continuousObserver?.disconnect();
   continuousObserver = null;
   continuousRoot = document.body;
@@ -740,6 +1167,8 @@ async function restoreOriginals(): Promise<void> {
     node.textContent = text;
   }
   translatedNodes.clear();
+  translatedTextByHash.clear();
+  pendingTranslationNodesByHash.clear();
   stopContinuousTranslation();
   await setTabStatus({ status: "restored" });
 }
@@ -757,8 +1186,6 @@ function showQuickTranslateButton(): void {
     justifyContent: "center",
     display: "flex",
     position: "fixed",
-    right: "16px",
-    bottom: "16px",
     width: "48px",
     height: "48px",
     border: "0",
@@ -771,6 +1198,10 @@ function showQuickTranslateButton(): void {
     transition: "filter 160ms ease, box-shadow 160ms ease, transform 160ms ease",
     boxShadow: "0 12px 30px rgba(15, 23, 42, 0.22)"
   });
+  quickButtonPosition = getDefaultQuickButtonPosition();
+  applyQuickButtonPosition(quickButtonPosition);
+  void restoreQuickButtonPosition();
+  installQuickButtonDragHandlers(quickTranslateButton);
   quickTranslateButton.addEventListener("mouseenter", () => {
     quickTranslateButton!.style.transform = "translateY(-1px)";
   });
@@ -778,6 +1209,7 @@ function showQuickTranslateButton(): void {
     quickTranslateButton!.style.transform = "";
   });
   quickTranslateButton.addEventListener("click", () => {
+    if (suppressQuickButtonClick) return;
     if (continuousObserver) {
       stopContinuousTranslation();
       return;
@@ -826,8 +1258,6 @@ function toggleQuickTranslateMenu(): void {
   quickTranslateMenu.dataset.translateAiQuickMenu = "true";
   Object.assign(quickTranslateMenu.style, {
     position: "fixed",
-    right: "16px",
-    bottom: "64px",
     minWidth: "190px",
     overflow: "hidden",
     borderRadius: "8px",
@@ -835,90 +1265,13 @@ function toggleQuickTranslateMenu(): void {
     boxShadow: "0 14px 34px rgba(15, 23, 42, 0.22)",
     zIndex: "2147483647"
   });
+  positionFloatingElementNearQuickButton(quickTranslateMenu, 190);
   quickTranslateMenu.append(
     createMenuButton("Dịch phần mới", "translate-new", () => startPageTranslation({ force: true })),
     createMenuButton(continuousObserver ? "Dừng dịch liên tục" : "Dịch liên tục toàn trang", "watch-page", toggleContinuousTranslation),
     createMenuButton("Chọn vùng để dịch", "pick-region", startRegionPick)
   );
   document.body.append(quickTranslateMenu);
-}
-
-function removeSelectionUi(): void {
-  selectionButton?.remove();
-  selectionPanel?.remove();
-  selectionButton = null;
-  selectionPanel = null;
-}
-
-function showSelectionPanel(text: string): void {
-  selectionPanel?.remove();
-  selectionPanel = document.createElement("div");
-  selectionPanel.dataset.translateAiSelectionPanel = "true";
-  selectionPanel.dataset.translateAiUi = "true";
-  selectionPanel.textContent = text;
-  Object.assign(selectionPanel.style, {
-    position: "fixed",
-    right: "16px",
-    bottom: "64px",
-    maxWidth: "360px",
-    padding: "12px",
-    borderRadius: "8px",
-    background: "#111827",
-    color: "#ffffff",
-    fontSize: "14px",
-    lineHeight: "1.4",
-    zIndex: "2147483647",
-    boxShadow: "0 12px 30px rgba(15, 23, 42, 0.24)"
-  });
-  document.body.append(selectionPanel);
-}
-
-function replaceSelectionRange(range: Range, translated: string): void {
-  range.deleteContents();
-  range.insertNode(document.createTextNode(translated));
-  window.getSelection()?.removeAllRanges();
-  removeSelectionUi();
-}
-
-function showSelectionButton(): void {
-  const selection = window.getSelection();
-  const selectedText = selection?.toString().trim();
-  removeSelectionUi();
-  if (!selectedText || !selection || selection.rangeCount === 0) return;
-
-  const selectedRange = selection.getRangeAt(0).cloneRange();
-
-  selectionButton = document.createElement("button");
-  selectionButton.dataset.translateAiUi = "true";
-  selectionButton.type = "button";
-  selectionButton.textContent = "Translate";
-  Object.assign(selectionButton.style, {
-    position: "fixed",
-    right: "16px",
-    bottom: "64px",
-    padding: "9px 12px",
-    border: "0",
-    borderRadius: "999px",
-    background: "#2563eb",
-    color: "#ffffff",
-    fontSize: "13px",
-    fontWeight: "600",
-    cursor: "pointer",
-    zIndex: "2147483647",
-    boxShadow: "0 10px 24px rgba(37, 99, 235, 0.3)"
-  });
-
-  selectionButton.addEventListener("click", async () => {
-    selectionButton!.textContent = "Translating...";
-    try {
-      const result = await sendMessage<{ text: string }>({ type: "TRANSLATE_SELECTION", text: selectedText });
-      replaceSelectionRange(selectedRange, result.text);
-    } catch (error) {
-      showSelectionPanel(getErrorMessage(error));
-    }
-  });
-
-  document.body.append(selectionButton);
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -933,10 +1286,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       .catch((error) => sendResponse({ error: getErrorMessage(error) }));
     return true;
   }
+  if (message?.type === "SETTINGS_UPDATED") {
+    restartActiveTranslationWithLatestSettings();
+    sendResponse({ ok: true });
+    return false;
+  }
   return false;
 });
 
-document.addEventListener("selectionchange", () => window.setTimeout(showSelectionButton, 120));
 document.addEventListener("DOMContentLoaded", showQuickTranslateButton);
 window.addEventListener("pagehide", stopContinuousTranslation);
 showQuickTranslateButton();
