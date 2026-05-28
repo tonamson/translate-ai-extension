@@ -216,6 +216,43 @@ describe("content script", () => {
     );
   });
 
+  it("restarts the in-flight batch with latest settings when settings change", async () => {
+    const firstTranslation = createDeferred<{ items: { id: string; text: string }[] }>();
+    const translatedItems: { id: string; text: string }[][] = [];
+    messageHandlers.TRANSLATE_ITEMS = (message) => {
+      translatedItems.push(message.items ?? []);
+      if (translatedItems.length === 1) return firstTranslation.promise;
+      return {
+        items: message.items?.map((item) => ({ id: item.id, text: `new-model:${item.text}` })) ?? []
+      };
+    };
+    await loadContentScript();
+    document.body.innerHTML = "<main><p>This paragraph has enough English text for page translation.</p></main>";
+
+    await expect(sendContentMessage({ type: "MANUAL_TRANSLATE_PAGE" })).resolves.toEqual({ ok: true });
+    await waitFor(() => translatedItems.length === 1);
+
+    runtimeListener({ type: "SETTINGS_UPDATED" }, {}, () => undefined);
+    await waitForScheduledBatch();
+    await waitFor(() => translatedItems.length === 2);
+
+    expect(translatedItems[1].map((item) => item.text)).toEqual([
+      "This paragraph has enough English text for page translation."
+    ]);
+    expect(document.querySelector("p")?.textContent).toBe(
+      "new-model:This paragraph has enough English text for page translation."
+    );
+
+    firstTranslation.resolve({
+      items: [{ id: "text-0", text: "old-model:This paragraph has enough English text for page translation." }]
+    });
+    await flushPromises();
+
+    expect(document.querySelector("p")?.textContent).toBe(
+      "new-model:This paragraph has enough English text for page translation."
+    );
+  });
+
   it("does not insert per-line translation loading markers", async () => {
     const translation = createDeferred<{ items: { id: string; text: string }[] }>();
     messageHandlers.TRANSLATE_ITEMS = () => translation.promise;
@@ -271,6 +308,33 @@ describe("content script", () => {
 
     expect(document.querySelector("p")?.textContent).toBe(
       "vi:This paragraph has enough English text for page translation."
+    );
+  });
+
+  it("waits briefly for page text when translating new content on a freshly rendered page", async () => {
+    vi.useFakeTimers();
+    await loadContentScript();
+    document.body.innerHTML = "<main></main>";
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+
+    document.querySelector<HTMLButtonElement>("[data-translate-ai-quick-action='true']")?.click();
+    document.querySelector<HTMLButtonElement>("[data-translate-ai-menu-action='translate-new']")?.click();
+    await flushPromises();
+
+    expect(document.querySelector("[data-translate-ai-page-indicator='true']")?.textContent).toContain(
+      "Waiting for page text 1/4"
+    );
+
+    document.querySelector("main")?.append(
+      Object.assign(document.createElement("p"), {
+        textContent: "This delayed paragraph appears after the manual translate click."
+      })
+    );
+    vi.advanceTimersByTime(350);
+    await flushPromises();
+
+    expect(document.querySelector("p")?.textContent).toBe(
+      "vi:This delayed paragraph appears after the manual translate click."
     );
   });
 
@@ -618,6 +682,85 @@ describe("content script", () => {
     await flushPromises();
 
     expect(translatedItems).toHaveLength(1);
+  });
+
+  it("reuses cached translations for remounted text instead of sending duplicate batches", async () => {
+    vi.useFakeTimers();
+    const translatedItems: { id: string; text: string }[][] = [];
+    messageHandlers.TRANSLATE_ITEMS = (message) => {
+      translatedItems.push(message.items ?? []);
+      return {
+        items: message.items?.map((item) => ({ id: item.id, text: `vi:${item.text}` })) ?? []
+      };
+    };
+    await loadContentScript();
+    document.body.innerHTML = "<main><p>This virtualized paragraph should not be translated twice.</p></main>";
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+
+    document.querySelector<HTMLButtonElement>("[data-translate-ai-quick-action='true']")?.click();
+    document.querySelector<HTMLButtonElement>("[data-translate-ai-menu-action='watch-page']")?.click();
+    await flushPromises();
+
+    expect(document.querySelector("p")?.textContent).toBe(
+      "vi:This virtualized paragraph should not be translated twice."
+    );
+
+    document.querySelector("p")?.remove();
+    document.querySelector("main")?.append(
+      Object.assign(document.createElement("p"), {
+        textContent: "This virtualized paragraph should not be translated twice."
+      })
+    );
+    await Promise.resolve();
+    vi.advanceTimersByTime(650);
+    await flushPromises();
+
+    expect(translatedItems).toHaveLength(1);
+    expect(document.querySelector("p")?.textContent).toBe(
+      "vi:This virtualized paragraph should not be translated twice."
+    );
+  });
+
+  it("does not queue duplicate remounted text while the original block is still in flight", async () => {
+    vi.useFakeTimers();
+    const firstTranslation = createDeferred<{ items: { id: string; text: string }[] }>();
+    const translatedItems: { id: string; text: string }[][] = [];
+    messageHandlers.TRANSLATE_ITEMS = (message) => {
+      translatedItems.push(message.items ?? []);
+      return firstTranslation.promise;
+    };
+    await loadContentScript();
+    document.body.innerHTML = "<main><p>Pending virtualized paragraph should join the in flight translation.</p></main>";
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+
+    document.querySelector<HTMLButtonElement>("[data-translate-ai-quick-action='true']")?.click();
+    document.querySelector<HTMLButtonElement>("[data-translate-ai-menu-action='watch-page']")?.click();
+    await waitFor(() => translatedItems.length === 1);
+
+    document.querySelector("p")?.remove();
+    document.querySelector("main")?.append(
+      Object.assign(document.createElement("p"), {
+        textContent: "Pending virtualized paragraph should join the in flight translation."
+      })
+    );
+    await Promise.resolve();
+    vi.advanceTimersByTime(650);
+    await flushPromises();
+
+    expect(translatedItems).toHaveLength(1);
+    expect(document.querySelector<HTMLButtonElement>("[data-translate-ai-quick-action='true']")?.dataset.translateAiQueuedBlocks).toBe("0");
+
+    firstTranslation.resolve({
+      items: [{
+        id: translatedItems[0][0].id,
+        text: "vi:Pending virtualized paragraph should join the in flight translation."
+      }]
+    });
+    await flushPromises();
+
+    expect(document.querySelector("p")?.textContent).toBe(
+      "vi:Pending virtualized paragraph should join the in flight translation."
+    );
   });
 
   it("acknowledges page translation commands and reports background translation failures through tab status", async () => {

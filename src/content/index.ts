@@ -4,10 +4,14 @@ import type { ExtensionSettings, PageAnalysis, TabStatus, TextItem } from "../sh
 
 const originals = new Map<Text, string>();
 const translatedNodes = new Set<Text>();
+const translatedTextByHash = new Map<string, { originalText: string; translatedText: string }>();
+const pendingTranslationNodesByHash = new Map<string, Set<Text>>();
 const MAX_TEXT_BLOCKS_PER_TRANSLATION_REQUEST = 10;
 const WATCH_SMALL_UPDATE_TEXT_BLOCK_LIMIT = 5;
 const WATCH_SMALL_UPDATE_DELAY_MS = 250;
 const WATCH_DEFAULT_UPDATE_DELAY_MS = 600;
+const MANUAL_COLLECT_RETRY_LIMIT = 4;
+const MANUAL_COLLECT_RETRY_DELAY_MS = 350;
 let quickTranslateButton: HTMLButtonElement | null = null;
 let quickTranslateMenu: HTMLDivElement | null = null;
 let regionHighlight: HTMLDivElement | null = null;
@@ -15,12 +19,13 @@ let selectionButton: HTMLButtonElement | null = null;
 let selectionPanel: HTMLDivElement | null = null;
 let pageTranslationIndicator: HTMLDivElement | null = null;
 let pageTranslationJob: Promise<void> | null = null;
+let pendingPageTranslationTimer: number | null = null;
 let continuousObserver: MutationObserver | null = null;
 let continuousTimer: number | null = null;
 let continuousRoot: ParentNode = document.body;
 let highlightedRegionElement: Element | null = null;
 let pendingContinuousTranslation = false;
-let queuedTranslationNodes = new Set<Text>();
+let queuedTranslationHashes = new Set<string>();
 let activeTranslationRunId = 0;
 const canceledTranslationRunIds = new Set<number>();
 let translationProgress = {
@@ -28,6 +33,7 @@ let translationProgress = {
   completedBlocks: 0,
   totalBlocks: 0
 };
+let activeTranslationSettingsSignature = "";
 
 type BackgroundErrorResponse = {
   error: string;
@@ -66,12 +72,71 @@ async function setTabStatus(status: TabStatus): Promise<void> {
   await sendMessage({ type: "SET_TAB_STATUS", status });
 }
 
+function wait(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+function pruneDetachedTextState(): void {
+  for (const node of translatedNodes) {
+    if (!node.isConnected) translatedNodes.delete(node);
+  }
+  for (const node of originals.keys()) {
+    if (!node.isConnected) originals.delete(node);
+  }
+}
+
 function rememberOriginals(items: CollectedTextNode[]): void {
   for (const item of items) {
     if (!originals.has(item.node)) {
       originals.set(item.node, item.node.textContent ?? "");
     }
   }
+}
+
+function normalizeSourceText(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function hashTextBlock(text: string): string {
+  const normalizedText = normalizeSourceText(text);
+  let hash = 2166136261;
+  for (let index = 0; index < normalizedText.length; index += 1) {
+    hash ^= normalizedText.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${normalizedText.length}:${hash.toString(36)}`;
+}
+
+function getSettingsSignature(settings: ExtensionSettings): string {
+  return [
+    settings.targetLanguage,
+    settings.apiProvider,
+    settings.openaiBaseUrl,
+    settings.openaiModel
+  ].join("\u0000");
+}
+
+function syncTranslationCacheSettings(settings: ExtensionSettings): void {
+  const signature = getSettingsSignature(settings);
+  if (signature === activeTranslationSettingsSignature) return;
+
+  translatedTextByHash.clear();
+  pendingTranslationNodesByHash.clear();
+  queuedTranslationHashes.clear();
+  activeTranslationSettingsSignature = signature;
+}
+
+function rememberTranslatedText(sourceText: string, translatedText: string): void {
+  const originalText = normalizeSourceText(sourceText);
+  if (!originalText) return;
+  translatedTextByHash.set(hashTextBlock(sourceText), { originalText, translatedText });
+}
+
+function getCachedTranslatedText(sourceText: string): string | undefined {
+  const originalText = normalizeSourceText(sourceText);
+  const cached = translatedTextByHash.get(hashTextBlock(sourceText));
+  if (!cached || cached.originalText !== originalText) return undefined;
+  return cached.translatedText;
 }
 
 function replaceTextPreservingBoundaryWhitespace(node: Text, translated: string): void {
@@ -84,6 +149,39 @@ function replaceTextPreservingBoundaryWhitespace(node: Text, translated: string)
 function replaceNodeTranslation(node: Text, translated: string): void {
   replaceTextPreservingBoundaryWhitespace(node, translated);
   translatedNodes.add(node);
+}
+
+function replaceCachedNodeTranslation(item: CollectedTextNode, translated: string): void {
+  if (!originals.has(item.node)) {
+    originals.set(item.node, item.node.textContent ?? "");
+  }
+  replaceNodeTranslation(item.node, translated);
+}
+
+function trackPendingTranslationNode(hash: string, node: Text): void {
+  const nodes = pendingTranslationNodesByHash.get(hash) ?? new Set<Text>();
+  nodes.add(node);
+  pendingTranslationNodesByHash.set(hash, nodes);
+}
+
+function applyTranslationToPendingNodes(hash: string, translated: string): void {
+  const nodes = pendingTranslationNodesByHash.get(hash);
+  if (!nodes) return;
+
+  for (const node of nodes) {
+    if (!node.isConnected || translatedNodes.has(node)) continue;
+    if (!originals.has(node)) {
+      originals.set(node, node.textContent ?? "");
+    }
+    replaceNodeTranslation(node, translated);
+  }
+  pendingTranslationNodesByHash.delete(hash);
+}
+
+function clearPendingTranslationNodesForItems(items: CollectedTextNode[]): void {
+  for (const item of items) {
+    pendingTranslationNodesByHash.delete(hashTextBlock(item.text));
+  }
 }
 
 function shouldTranslatePage(settings: ExtensionSettings, analysis: PageAnalysis, force: boolean): boolean {
@@ -110,12 +208,29 @@ function cancelActiveTranslation(): void {
   logContentDebug("translate:cancel", { runId: activeTranslationRunId });
 }
 
+function restartActiveTranslationWithLatestSettings(): void {
+  if (!pageTranslationJob) return;
+
+  const restartRoot = continuousObserver ? continuousRoot : document.body;
+  canceledTranslationRunIds.add(activeTranslationRunId);
+  pendingTranslationNodesByHash.clear();
+  queuedTranslationHashes.clear();
+  pageTranslationJob = null;
+  quickTranslateButton?.removeAttribute("disabled");
+  showPageTranslationIndicator("Settings changed, restarting...");
+  logContentDebug("translate:restart-settings", {
+    runId: activeTranslationRunId,
+    root: restartRoot instanceof Element ? describeElement(restartRoot) : "document"
+  });
+  schedulePageTranslation({ force: true, root: restartRoot }, 0);
+}
+
 function getQueuedTranslationBlockCount(): number {
-  return queuedTranslationNodes.size;
+  return queuedTranslationHashes.size;
 }
 
 function resetQueuedTranslationState(): void {
-  queuedTranslationNodes = new Set<Text>();
+  queuedTranslationHashes = new Set<string>();
 }
 
 function resetTranslationProgress(): void {
@@ -160,8 +275,11 @@ function startOrExtendTranslationProgress(nodeCount: number, continuous: boolean
 function addQueuedNodesToTranslationProgress(nodes: CollectedTextNode[]): number {
   let addedBlocks = 0;
   for (const item of nodes) {
-    if (queuedTranslationNodes.has(item.node)) continue;
-    queuedTranslationNodes.add(item.node);
+    const hash = hashTextBlock(item.text);
+    if (queuedTranslationHashes.has(hash) || pendingTranslationNodesByHash.has(hash) || getCachedTranslatedText(item.text) !== undefined) {
+      continue;
+    }
+    queuedTranslationHashes.add(hash);
     addedBlocks += 1;
   }
   if (addedBlocks > 0) {
@@ -288,7 +406,49 @@ function showPageTranslationIndicator(message = "Preparing translation..."): voi
 }
 
 function collectUntranslatedTextNodes(root: ParentNode): CollectedTextNode[] {
-  return collectVisibleTextNodes(root).filter((item) => !translatedNodes.has(item.node));
+  pruneDetachedTextState();
+  return collectVisibleTextNodes(root).filter((item) => {
+    if (translatedNodes.has(item.node)) return false;
+
+    const hash = hashTextBlock(item.text);
+    const cachedTranslation = getCachedTranslatedText(item.text);
+    if (cachedTranslation !== undefined) {
+      replaceCachedNodeTranslation(item, cachedTranslation);
+      return false;
+    }
+
+    if (pendingTranslationNodesByHash.has(hash)) {
+      trackPendingTranslationNode(hash, item.node);
+      return false;
+    }
+
+    return true;
+  });
+}
+
+function prepareUniqueTextNodesForTranslation(nodes: CollectedTextNode[]): CollectedTextNode[] {
+  const uniqueNodes: CollectedTextNode[] = [];
+  const preparedHashes = new Set<string>();
+
+  for (const item of nodes) {
+    if (translatedNodes.has(item.node)) continue;
+
+    const hash = hashTextBlock(item.text);
+    const cachedTranslation = getCachedTranslatedText(item.text);
+    if (cachedTranslation !== undefined) {
+      replaceCachedNodeTranslation(item, cachedTranslation);
+      continue;
+    }
+
+    trackPendingTranslationNode(hash, item.node);
+    if (preparedHashes.has(hash)) continue;
+
+    preparedHashes.add(hash);
+    queuedTranslationHashes.delete(hash);
+    uniqueNodes.push(item);
+  }
+
+  return uniqueNodes;
 }
 
 function chunkCollectedTextNodes(items: CollectedTextNode[], maxItems: number): CollectedTextNode[][] {
@@ -303,13 +463,27 @@ function waitForNextTranslationBatch(): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, 0));
 }
 
+function clearPendingPageTranslationTimer(): void {
+  if (pendingPageTranslationTimer === null) return;
+  window.clearTimeout(pendingPageTranslationTimer);
+  pendingPageTranslationTimer = null;
+}
+
+function schedulePageTranslation(options: { force?: boolean; root?: ParentNode }, delay: number): void {
+  clearPendingPageTranslationTimer();
+  pendingPageTranslationTimer = window.setTimeout(() => {
+    pendingPageTranslationTimer = null;
+    startPageTranslation(options);
+  }, delay);
+}
+
 function isInsideTranslateAiUi(node: Node): boolean {
   const element = node instanceof Element ? node : node.parentElement;
   return element?.closest("[data-translate-ai-ui='true']") !== null;
 }
 
 function collectMutationTextNodes(records: MutationRecord[], root: ParentNode): CollectedTextNode[] {
-  const nodes = new Map<Text, CollectedTextNode>();
+  const nodes = new Map<string, CollectedTextNode>();
 
   for (const record of records) {
     if (isInsideTranslateAiUi(record.target)) continue;
@@ -319,7 +493,7 @@ function collectMutationTextNodes(records: MutationRecord[], root: ParentNode): 
       const parent = record.target.parentElement;
       if (parent && rootContainsNode(root, record.target)) {
         for (const item of collectUntranslatedTextNodes(parent)) {
-          nodes.set(item.node, item);
+          nodes.set(hashTextBlock(item.text), item);
         }
       }
       continue;
@@ -339,7 +513,7 @@ function collectMutationTextNodes(records: MutationRecord[], root: ParentNode): 
       if (!collectRoot) continue;
 
       for (const item of collectUntranslatedTextNodes(collectRoot)) {
-        nodes.set(item.node, item);
+        nodes.set(hashTextBlock(item.text), item);
       }
     }
   }
@@ -376,8 +550,15 @@ async function translatePage({
   showPageTranslationIndicator("Collecting text...");
   const settings = await sendMessage<ExtensionSettings>({ type: "GET_SETTINGS" });
   if (isTranslationRunCanceled(runId)) return;
+  syncTranslationCacheSettings(settings);
   const translationRoot = force ? resolveRootWithText(root) : root;
-  const nodes = collectUntranslatedTextNodes(translationRoot);
+  let nodes = collectUntranslatedTextNodes(translationRoot);
+  for (let retryIndex = 0; force && nodes.length === 0 && retryIndex < MANUAL_COLLECT_RETRY_LIMIT; retryIndex += 1) {
+    showPageTranslationIndicator(`Waiting for page text ${retryIndex + 1}/${MANUAL_COLLECT_RETRY_LIMIT}...`);
+    await wait(MANUAL_COLLECT_RETRY_DELAY_MS);
+    if (isTranslationRunCanceled(runId)) return;
+    nodes = collectUntranslatedTextNodes(translationRoot);
+  }
   const sample = createPageSample(nodes);
   logContentDebug("translate:collect", {
     force,
@@ -414,10 +595,17 @@ async function translatePage({
     }
   }
 
-  startOrExtendTranslationProgress(nodes.length, continuousObserver !== null);
-  rememberOriginals(nodes);
+  const translatableNodes = prepareUniqueTextNodesForTranslation(nodes);
+  if (translatableNodes.length === 0) {
+    logContentDebug("translate:skip", { reason: "already-queued-or-translated" });
+    if (!translationProgress.active) hidePageTranslationIndicator();
+    return;
+  }
+
+  startOrExtendTranslationProgress(translatableNodes.length, continuousObserver !== null);
+  rememberOriginals(translatableNodes);
   try {
-    const chunks = chunkCollectedTextNodes(nodes, MAX_TEXT_BLOCKS_PER_TRANSLATION_REQUEST);
+    const chunks = chunkCollectedTextNodes(translatableNodes, MAX_TEXT_BLOCKS_PER_TRANSLATION_REQUEST);
     for (let index = 0; index < chunks.length; index += 1) {
       if (isTranslationRunCanceled(runId)) return;
       const chunk = chunks[index];
@@ -429,11 +617,20 @@ async function translatePage({
         totalBlocks: translationProgress.totalBlocks,
         totalChars: chunk.reduce((sum, item) => sum + item.text.length, 0)
       });
-      const response = await sendMessage<{ items: TextItem[] }>({
-        type: "TRANSLATE_ITEMS",
-        items: chunk.map(({ id, text }) => ({ id, text }))
-      });
-      if (isTranslationRunCanceled(runId)) return;
+      let response: { items: TextItem[] };
+      try {
+        response = await sendMessage<{ items: TextItem[] }>({
+          type: "TRANSLATE_ITEMS",
+          items: chunk.map(({ id, text }) => ({ id, text }))
+        });
+      } catch (error) {
+        clearPendingTranslationNodesForItems(chunk);
+        throw error;
+      }
+      if (isTranslationRunCanceled(runId)) {
+        clearPendingTranslationNodesForItems(chunk);
+        return;
+      }
       logContentDebug("translate:response", {
         batchIndex: getCurrentTranslationBatch(chunk.length),
         batchCount: getTranslationBatchCount(),
@@ -442,7 +639,11 @@ async function translatePage({
       const translatedById = new Map(response.items.map((item) => [item.id, item.text]));
       for (const item of chunk) {
         const translated = translatedById.get(item.id);
-        if (translated !== undefined) replaceNodeTranslation(item.node, translated);
+        if (translated !== undefined) {
+          const hash = hashTextBlock(item.text);
+          rememberTranslatedText(item.text, translated);
+          applyTranslationToPendingNodes(hash, translated);
+        }
       }
       translationProgress.completedBlocks += chunk.length;
       if (index < chunks.length - 1) {
@@ -452,11 +653,13 @@ async function translatePage({
   } finally {
     logContentDebug("translate:done");
     if (isTranslationRunCanceled(runId)) {
-      resetTranslationProgress();
-      hidePageTranslationIndicator();
+      if (runId === activeTranslationRunId) {
+        resetTranslationProgress();
+        hidePageTranslationIndicator();
+      }
       return;
     }
-    const hasFollowUpWork = continuousObserver !== null && (pendingContinuousTranslation || queuedTranslationNodes.size > 0);
+    const hasFollowUpWork = continuousObserver !== null && (pendingContinuousTranslation || queuedTranslationHashes.size > 0);
     if (!hasFollowUpWork) {
       resetTranslationProgress();
       hidePageTranslationIndicator();
@@ -558,7 +761,7 @@ function startPageTranslation(options: { force?: boolean; root?: ParentNode } = 
           root: continuousRoot instanceof Element ? describeElement(continuousRoot) : "document"
         });
         updateTranslationProgressUi();
-        window.setTimeout(() => startPageTranslation({ force: true, root: continuousRoot }), 0);
+        schedulePageTranslation({ force: true, root: continuousRoot }, 0);
       }
     });
 }
@@ -595,6 +798,14 @@ function scheduleContinuousTranslation(newTextNodes: CollectedTextNode[] = []): 
 }
 
 function stopContinuousTranslation(): void {
+  clearPendingPageTranslationTimer();
+  if (pageTranslationJob) {
+    canceledTranslationRunIds.add(activeTranslationRunId);
+    pageTranslationJob = null;
+  }
+  translatedTextByHash.clear();
+  pendingTranslationNodesByHash.clear();
+  activeTranslationSettingsSignature = "";
   continuousObserver?.disconnect();
   continuousObserver = null;
   continuousRoot = document.body;
@@ -740,6 +951,8 @@ async function restoreOriginals(): Promise<void> {
     node.textContent = text;
   }
   translatedNodes.clear();
+  translatedTextByHash.clear();
+  pendingTranslationNodesByHash.clear();
   stopContinuousTranslation();
   await setTabStatus({ status: "restored" });
 }
@@ -932,6 +1145,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       .then(() => sendResponse({ ok: true }))
       .catch((error) => sendResponse({ error: getErrorMessage(error) }));
     return true;
+  }
+  if (message?.type === "SETTINGS_UPDATED") {
+    restartActiveTranslationWithLatestSettings();
+    sendResponse({ ok: true });
+    return false;
   }
   return false;
 });

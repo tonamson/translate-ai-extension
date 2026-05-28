@@ -25,6 +25,10 @@ type TranslatedItemsResponse = {
 
 type Validator<T> = (value: unknown) => value is T;
 
+type AiRequestOptions = {
+  signal?: AbortSignal;
+};
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -133,68 +137,64 @@ function logAiDebug(message: string, data?: unknown): void {
   console.debug(`[Translate AI][api] ${message}`, data ?? "");
 }
 
-async function generateOpenAiCompatibleText(settings: ExtensionSettings, prompt: string): Promise<string> {
+async function generateOpenAiCompatibleText(
+  settings: ExtensionSettings,
+  prompt: string,
+  options: AiRequestOptions = {}
+): Promise<string> {
   const endpoint = settings.openaiBaseUrl.replace(/\/$/, "");
   const model = requireModel(settings);
   const url = `${endpoint}/chat/completions`;
-  const reasoningEfforts: Array<"none" | "minimal" | undefined> = ["none", "minimal", undefined];
+  const startedAt = Date.now();
+  const body = {
+    model,
+    messages: [{ role: "user", content: prompt }],
+    stream: false
+  };
 
-  for (const reasoningEffort of reasoningEfforts) {
-    const startedAt = Date.now();
-    const body = {
-      model,
-      messages: [{ role: "user", content: prompt }],
-      stream: false,
-      ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {})
-    };
+  logAiDebug("request:start", {
+    provider: settings.apiProvider,
+    url,
+    model,
+    promptChars: prompt.length
+  });
 
-    logAiDebug("request:start", {
-      provider: settings.apiProvider,
-      url,
-      model,
-      promptChars: prompt.length,
-      reasoningEffort: reasoningEffort ?? "omitted"
-    });
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${settings.openaiApiKey}`,
+      "Content-Type": "application/json"
+    },
+    signal: options.signal,
+    body: JSON.stringify(body)
+  });
 
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${settings.openaiApiKey}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(body)
-    });
+  logAiDebug("request:response", {
+    provider: settings.apiProvider,
+    url,
+    status: response.status,
+    ok: response.ok,
+    elapsedMs: Date.now() - startedAt
+  });
 
-    logAiDebug("request:response", {
-      provider: settings.apiProvider,
-      url,
-      status: response.status,
-      ok: response.ok,
-      elapsedMs: Date.now() - startedAt,
-      reasoningEffort: reasoningEffort ?? "omitted"
-    });
-
-    if (!response.ok) {
-      if ((response.status === 400 || response.status === 422) && reasoningEffort !== undefined) {
-        logAiDebug("request:retry-with-lower-reasoning", { status: response.status });
-        continue;
-      }
-      throw new Error(`AI request failed: ${response.status}`);
-    }
-
-    const data = (await response.json()) as ChatCompletionResponse;
-    const content = data.choices?.[0]?.message?.content;
-    if (!content) {
-      throw new Error("AI response was empty");
-    }
-
-    return content;
+  if (!response.ok) {
+    throw new Error(`AI request failed: ${response.status}`);
   }
 
-  throw new Error("AI request failed");
+  const data = (await response.json()) as ChatCompletionResponse;
+  const content = data.choices?.[0]?.message?.content;
+  if (!content) {
+    throw new Error("AI response was empty");
+  }
+
+  return content;
 }
 
-async function generateAnthropicText(settings: ExtensionSettings, prompt: string): Promise<string> {
+async function generateAnthropicText(
+  settings: ExtensionSettings,
+  prompt: string,
+  options: AiRequestOptions = {}
+): Promise<string> {
   const endpoint = settings.openaiBaseUrl.replace(/\/$/, "");
   const model = requireModel(settings);
   const url = `${endpoint}/messages`;
@@ -224,6 +224,7 @@ async function generateAnthropicText(settings: ExtensionSettings, prompt: string
         "anthropic-version": "2023-06-01",
         "Content-Type": "application/json"
       },
+      signal: options.signal,
       body: JSON.stringify(body)
     });
 
@@ -256,10 +257,14 @@ async function generateAnthropicText(settings: ExtensionSettings, prompt: string
   throw new Error("AI request failed");
 }
 
-async function generateText(settings: ExtensionSettings, prompt: string): Promise<string> {
+async function generateText(
+  settings: ExtensionSettings,
+  prompt: string,
+  options: AiRequestOptions = {}
+): Promise<string> {
   return settings.apiProvider === "anthropic"
-    ? generateAnthropicText(settings, prompt)
-    : generateOpenAiCompatibleText(settings, prompt);
+    ? generateAnthropicText(settings, prompt, options)
+    : generateOpenAiCompatibleText(settings, prompt, options);
 }
 
 function parseAndValidateJson<T>(text: string, validator: Validator<T>, validationError: string): T {
@@ -289,9 +294,10 @@ async function generateValidatedJson<T>(
   schemaName: string,
   schemaDescription: string,
   validator: Validator<T>,
-  validationError: string
+  validationError: string,
+  options: AiRequestOptions = {}
 ): Promise<T> {
-  const firstResponse = await generateText(settings, prompt);
+  const firstResponse = await generateText(settings, prompt, options);
 
   try {
     return parseAndValidateJson(firstResponse, validator, validationError);
@@ -299,7 +305,7 @@ async function generateValidatedJson<T>(
     const repairPrompt = buildJsonRepairPrompt(schemaName, schemaDescription, prompt, firstResponse);
 
     try {
-      const repairedResponse = await generateText(settings, repairPrompt);
+      const repairedResponse = await generateText(settings, repairPrompt, options);
       return parseAndValidateJson(repairedResponse, validator, validationError);
     } catch (repairError) {
       throw new Error(`${validationError} after JSON repair retry: ${getErrorMessage(repairError)}`);
@@ -307,7 +313,11 @@ async function generateValidatedJson<T>(
   }
 }
 
-export async function analyzeLanguage(settings: ExtensionSettings, sample: string): Promise<PageAnalysis> {
+export async function analyzeLanguage(
+  settings: ExtensionSettings,
+  sample: string,
+  options: AiRequestOptions = {}
+): Promise<PageAnalysis> {
   const suppliedContent = JSON.stringify({ sample }, null, 2);
   const prompt = [
     "Detect the language of this web page sample.",
@@ -324,11 +334,16 @@ export async function analyzeLanguage(settings: ExtensionSettings, sample: strin
     "PageAnalysis",
     "{\"detectedLanguage\":\"string\",\"confidence\":0.0,\"isForeign\":true,\"shouldTranslate\":true,\"reason\":\"string\"}",
     isPageAnalysis,
-    "Invalid PageAnalysis response"
+    "Invalid PageAnalysis response",
+    options
   );
 }
 
-export async function translateItems(settings: ExtensionSettings, items: TextItem[]): Promise<TextItem[]> {
+export async function translateItems(
+  settings: ExtensionSettings,
+  items: TextItem[],
+  options: AiRequestOptions = {}
+): Promise<TextItem[]> {
   if (!isTextItemArray(items)) {
     throw new Error("Invalid translateItems input: items must contain { id: string, text: string }");
   }
@@ -347,13 +362,18 @@ export async function translateItems(settings: ExtensionSettings, items: TextIte
     "translated items",
     "{\"items\":[{\"id\":\"string\",\"text\":\"string\"}]}",
     isTranslatedItemsResponse,
-    "Invalid translated items response"
+    "Invalid translated items response",
+    options
   );
 
   return result.items;
 }
 
-export async function translateSelection(settings: ExtensionSettings, text: string): Promise<string> {
+export async function translateSelection(
+  settings: ExtensionSettings,
+  text: string,
+  options: AiRequestOptions = {}
+): Promise<string> {
   const suppliedContent = JSON.stringify({ text }, null, 2);
   const prompt = [
     `Translate this text to ${settings.targetLanguage}.`,
@@ -368,7 +388,8 @@ export async function translateSelection(settings: ExtensionSettings, text: stri
     "selection translation",
     "{\"text\":\"translated text\"}",
     isSelectionTranslationResponse,
-    "Invalid selection translation response"
+    "Invalid selection translation response",
+    options
   );
 
   return result.text;

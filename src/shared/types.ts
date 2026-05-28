@@ -44,6 +44,7 @@ export type TabStatus = {
 export type RuntimeMessage =
   | { type: "GET_SETTINGS" }
   | { type: "SAVE_SETTINGS"; settings: ExtensionSettings }
+  | { type: "SETTINGS_UPDATED" }
   | { type: "GET_TAB_STATUS"; tabId: number }
   | { type: "ANALYZE_PAGE"; sample: string }
   | { type: "TRANSLATE_ITEMS"; items: TextItem[] }

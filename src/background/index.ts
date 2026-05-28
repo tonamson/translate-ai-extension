@@ -5,6 +5,7 @@ import type { RuntimeMessage, TabStatus, TextItem } from "../shared/types";
 
 const STATUS_KEY_PREFIX = "translateAiTabStatus:";
 const fallbackTabStatuses = new Map<number, TabStatus>();
+const activeTranslationControllers = new Set<AbortController>();
 
 function getSenderTabId(sender: chrome.runtime.MessageSender): number | undefined {
   return sender.tab?.id;
@@ -24,6 +25,28 @@ function getSessionStorage(): chrome.storage.StorageArea | undefined {
 
 function logBackgroundDebug(message: string, data?: unknown): void {
   console.debug(`[Translate AI][background] ${message}`, data ?? "");
+}
+
+function abortActiveTranslations(): void {
+  for (const controller of activeTranslationControllers) {
+    controller.abort();
+  }
+  activeTranslationControllers.clear();
+}
+
+async function notifyTabsSettingsUpdated(): Promise<void> {
+  if (!chrome.tabs?.query || !chrome.tabs?.sendMessage) return;
+
+  try {
+    const tabs = await chrome.tabs.query({});
+    await Promise.all(
+      tabs
+        .filter((tab): tab is chrome.tabs.Tab & { id: number } => typeof tab.id === "number")
+        .map((tab) => chrome.tabs.sendMessage(tab.id, { type: "SETTINGS_UPDATED" }).catch(() => undefined))
+    );
+  } catch {
+    // Tabs without the content script loaded are expected.
+  }
 }
 
 async function getTabStatus(tabId: number): Promise<TabStatus> {
@@ -61,8 +84,11 @@ async function handleMessage(message: RuntimeMessage, sender: chrome.runtime.Mes
   if (message.type === "GET_SETTINGS") return getSettings();
   if (message.type === "SAVE_SETTINGS") {
     await saveSettings(message.settings);
+    abortActiveTranslations();
+    void notifyTabsSettingsUpdated();
     return { ok: true };
   }
+  if (message.type === "SETTINGS_UPDATED") return { ok: true };
   if (message.type === "GET_TAB_STATUS") return getTabStatus(message.tabId);
   if (message.type === "SET_TAB_STATUS") {
     const tabId = message.tabId ?? getSenderTabId(sender);
@@ -105,6 +131,8 @@ async function handleMessage(message: RuntimeMessage, sender: chrome.runtime.Mes
   }
 
   if (message.type === "TRANSLATE_ITEMS") {
+    const controller = new AbortController();
+    activeTranslationControllers.add(controller);
     try {
       const chunks = chunkTextItems(message.items, 5000);
       logBackgroundDebug("translate-items:start", {
@@ -125,7 +153,7 @@ async function handleMessage(message: RuntimeMessage, sender: chrome.runtime.Mes
         if (tabId !== undefined) {
           await setTabStatus(tabId, { status: "translating", progress: { done: index, total: chunks.length } });
         }
-        translated.push(...(await translateItems(settings, chunks[index])));
+        translated.push(...(await translateItems(settings, chunks[index], { signal: controller.signal })));
         logBackgroundDebug("translate-items:chunk:done", {
           tabId,
           chunkIndex: index + 1,
@@ -141,6 +169,8 @@ async function handleMessage(message: RuntimeMessage, sender: chrome.runtime.Mes
         await setTabStatus(tabId, { status: "error", message: getErrorMessage(error) });
       }
       throw error;
+    } finally {
+      activeTranslationControllers.delete(controller);
     }
   }
 
