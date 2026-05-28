@@ -4,7 +4,6 @@ import type { RuntimeMessage } from "../shared/types";
 const mockGetSettings = vi.fn();
 const mockAnalyzeLanguage = vi.fn();
 const mockTranslateItems = vi.fn();
-const mockTranslateSelection = vi.fn();
 
 vi.mock("../shared/settings", () => ({
   getSettings: mockGetSettings,
@@ -13,8 +12,7 @@ vi.mock("../shared/settings", () => ({
 
 vi.mock("../shared/ai", () => ({
   analyzeLanguage: mockAnalyzeLanguage,
-  translateItems: mockTranslateItems,
-  translateSelection: mockTranslateSelection
+  translateItems: mockTranslateItems
 }));
 
 type RuntimeListener = (
@@ -105,7 +103,6 @@ beforeEach(() => {
   vi.clearAllMocks();
   installChromeMock();
   mockGetSettings.mockResolvedValue(settings);
-  mockTranslateSelection.mockResolvedValue("Xin chao");
 });
 
 afterEach(() => {

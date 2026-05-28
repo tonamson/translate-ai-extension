@@ -1,5 +1,5 @@
 import { chunkTextItems } from "../shared/chunking";
-import { analyzeLanguage, translateItems, translateSelection } from "../shared/ai";
+import { analyzeLanguage, translateItems } from "../shared/ai";
 import { getSettings, saveSettings } from "../shared/settings";
 import type { RuntimeMessage, TabStatus, TextItem } from "../shared/types";
 
@@ -106,8 +106,7 @@ async function handleMessage(message: RuntimeMessage, sender: chrome.runtime.Mes
     baseUrl: settings.openaiBaseUrl,
     model: settings.openaiModel,
     itemCount: "items" in message ? message.items.length : undefined,
-    sampleChars: "sample" in message ? message.sample.length : undefined,
-    textChars: "text" in message ? message.text.length : undefined
+    sampleChars: "sample" in message ? message.sample.length : undefined
   });
 
   if (message.type === "ANALYZE_PAGE") {
@@ -172,10 +171,6 @@ async function handleMessage(message: RuntimeMessage, sender: chrome.runtime.Mes
     } finally {
       activeTranslationControllers.delete(controller);
     }
-  }
-
-  if (message.type === "TRANSLATE_SELECTION") {
-    return { text: await translateSelection(settings, message.text) };
   }
 
   return { ok: false };

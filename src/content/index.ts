@@ -12,11 +12,12 @@ const WATCH_SMALL_UPDATE_DELAY_MS = 250;
 const WATCH_DEFAULT_UPDATE_DELAY_MS = 600;
 const MANUAL_COLLECT_RETRY_LIMIT = 4;
 const MANUAL_COLLECT_RETRY_DELAY_MS = 350;
+const QUICK_BUTTON_POSITION_STORAGE_KEY = "translateAiQuickButtonPosition";
+const QUICK_BUTTON_SIZE = 48;
+const QUICK_BUTTON_MARGIN = 16;
 let quickTranslateButton: HTMLButtonElement | null = null;
 let quickTranslateMenu: HTMLDivElement | null = null;
 let regionHighlight: HTMLDivElement | null = null;
-let selectionButton: HTMLButtonElement | null = null;
-let selectionPanel: HTMLDivElement | null = null;
 let pageTranslationIndicator: HTMLDivElement | null = null;
 let pageTranslationJob: Promise<void> | null = null;
 let pendingPageTranslationTimer: number | null = null;
@@ -34,6 +35,22 @@ let translationProgress = {
   totalBlocks: 0
 };
 let activeTranslationSettingsSignature = "";
+
+type QuickButtonEdge = "left" | "right" | "top" | "bottom";
+
+type QuickButtonPosition = {
+  edge: QuickButtonEdge;
+  offset: number;
+};
+
+type QuickButtonDragState = {
+  pointerId: number;
+  dragging: boolean;
+};
+
+let quickButtonPosition: QuickButtonPosition | null = null;
+let quickButtonDragState: QuickButtonDragState | null = null;
+let suppressQuickButtonClick = false;
 
 type BackgroundErrorResponse = {
   error: string;
@@ -74,6 +91,158 @@ async function setTabStatus(status: TabStatus): Promise<void> {
 
 function wait(milliseconds: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function getDefaultQuickButtonPosition(): QuickButtonPosition {
+  return {
+    edge: "right",
+    offset: Math.max(QUICK_BUTTON_MARGIN, window.innerHeight - QUICK_BUTTON_SIZE - QUICK_BUTTON_MARGIN)
+  };
+}
+
+function isQuickButtonPosition(value: unknown): value is QuickButtonPosition {
+  if (typeof value !== "object" || value === null) return false;
+  const position = value as Partial<QuickButtonPosition>;
+  return (
+    (position.edge === "left" || position.edge === "right" || position.edge === "top" || position.edge === "bottom") &&
+    typeof position.offset === "number" &&
+    Number.isFinite(position.offset)
+  );
+}
+
+function applyQuickButtonPosition(position: QuickButtonPosition): void {
+  if (!quickTranslateButton) return;
+
+  const maxLeft = Math.max(QUICK_BUTTON_MARGIN, window.innerWidth - QUICK_BUTTON_SIZE - QUICK_BUTTON_MARGIN);
+  const maxTop = Math.max(QUICK_BUTTON_MARGIN, window.innerHeight - QUICK_BUTTON_SIZE - QUICK_BUTTON_MARGIN);
+  const offset = position.edge === "left" || position.edge === "right"
+    ? clampNumber(position.offset, QUICK_BUTTON_MARGIN, maxTop)
+    : clampNumber(position.offset, QUICK_BUTTON_MARGIN, maxLeft);
+
+  Object.assign(quickTranslateButton.style, {
+    left: "",
+    right: "",
+    top: "",
+    bottom: ""
+  });
+
+  if (position.edge === "left") {
+    quickTranslateButton.style.left = `${QUICK_BUTTON_MARGIN}px`;
+    quickTranslateButton.style.top = `${offset}px`;
+  } else if (position.edge === "right") {
+    quickTranslateButton.style.right = `${QUICK_BUTTON_MARGIN}px`;
+    quickTranslateButton.style.top = `${offset}px`;
+  } else if (position.edge === "top") {
+    quickTranslateButton.style.top = `${QUICK_BUTTON_MARGIN}px`;
+    quickTranslateButton.style.left = `${offset}px`;
+  } else {
+    quickTranslateButton.style.bottom = `${QUICK_BUTTON_MARGIN}px`;
+    quickTranslateButton.style.left = `${offset}px`;
+  }
+}
+
+function saveQuickButtonPosition(position: QuickButtonPosition): void {
+  quickButtonPosition = position;
+  void chrome.storage.local.set({ [QUICK_BUTTON_POSITION_STORAGE_KEY]: position }).catch(() => undefined);
+}
+
+async function restoreQuickButtonPosition(): Promise<void> {
+  try {
+    const stored = await chrome.storage.local.get(QUICK_BUTTON_POSITION_STORAGE_KEY);
+    const position = stored[QUICK_BUTTON_POSITION_STORAGE_KEY];
+    if (isQuickButtonPosition(position)) {
+      quickButtonPosition = position;
+      applyQuickButtonPosition(position);
+    }
+  } catch {
+    // Ignore storage failures; the button still works at the default position.
+  }
+}
+
+function getQuickButtonDragPosition(event: PointerEvent): { left: number; top: number } {
+  const maxLeft = Math.max(QUICK_BUTTON_MARGIN, window.innerWidth - QUICK_BUTTON_SIZE - QUICK_BUTTON_MARGIN);
+  const maxTop = Math.max(QUICK_BUTTON_MARGIN, window.innerHeight - QUICK_BUTTON_SIZE - QUICK_BUTTON_MARGIN);
+  return {
+    left: clampNumber(event.clientX - QUICK_BUTTON_SIZE / 2, QUICK_BUTTON_MARGIN, maxLeft),
+    top: clampNumber(event.clientY - QUICK_BUTTON_SIZE / 2, QUICK_BUTTON_MARGIN, maxTop)
+  };
+}
+
+function moveQuickButtonTo(left: number, top: number): void {
+  if (!quickTranslateButton) return;
+  Object.assign(quickTranslateButton.style, {
+    left: `${left}px`,
+    top: `${top}px`,
+    right: "",
+    bottom: ""
+  });
+}
+
+function getQuickButtonViewportBox(): { left: number; top: number; width: number; height: number } {
+  if (!quickTranslateButton) {
+    const fallback = getDefaultQuickButtonPosition();
+    return {
+      left: window.innerWidth - QUICK_BUTTON_SIZE - QUICK_BUTTON_MARGIN,
+      top: fallback.offset,
+      width: QUICK_BUTTON_SIZE,
+      height: QUICK_BUTTON_SIZE
+    };
+  }
+
+  const left = quickTranslateButton.style.left
+    ? Number.parseFloat(quickTranslateButton.style.left)
+    : window.innerWidth - Number.parseFloat(quickTranslateButton.style.right || `${QUICK_BUTTON_MARGIN}`) - QUICK_BUTTON_SIZE;
+  const top = quickTranslateButton.style.top
+    ? Number.parseFloat(quickTranslateButton.style.top)
+    : window.innerHeight - Number.parseFloat(quickTranslateButton.style.bottom || `${QUICK_BUTTON_MARGIN}`) - QUICK_BUTTON_SIZE;
+
+  return {
+    left,
+    top,
+    width: QUICK_BUTTON_SIZE,
+    height: QUICK_BUTTON_SIZE
+  };
+}
+
+function positionFloatingElementNearQuickButton(element: HTMLElement, preferredWidth: number): void {
+  const anchor = getQuickButtonViewportBox();
+  const gap = 8;
+  const maxLeft = Math.max(QUICK_BUTTON_MARGIN, window.innerWidth - preferredWidth - QUICK_BUTTON_MARGIN);
+  const left = clampNumber(anchor.left + anchor.width / 2 - preferredWidth / 2, QUICK_BUTTON_MARGIN, maxLeft);
+  const opensBelow = anchor.top + anchor.height / 2 < window.innerHeight / 2;
+  const top = opensBelow
+    ? anchor.top + anchor.height + gap
+    : Math.max(QUICK_BUTTON_MARGIN, anchor.top - gap - 160);
+
+  Object.assign(element.style, {
+    left: `${left}px`,
+    top: `${top}px`,
+    right: "",
+    bottom: ""
+  });
+}
+
+function snapQuickButtonToNearestEdge(left: number, top: number): QuickButtonPosition {
+  const centerX = left + QUICK_BUTTON_SIZE / 2;
+  const centerY = top + QUICK_BUTTON_SIZE / 2;
+  const distances: Record<QuickButtonEdge, number> = {
+    left: centerX,
+    right: window.innerWidth - centerX,
+    top: centerY,
+    bottom: window.innerHeight - centerY
+  };
+  const edge = (Object.keys(distances) as QuickButtonEdge[]).reduce((nearest, candidate) => {
+    return distances[candidate] < distances[nearest] ? candidate : nearest;
+  }, "right");
+
+  return {
+    edge,
+    offset: edge === "left" || edge === "right" ? top : left
+  };
 }
 
 function pruneDetachedTextState(): void {
@@ -717,6 +886,53 @@ function createQuickTranslateLogo(): HTMLImageElement {
   return image;
 }
 
+function installQuickButtonDragHandlers(button: HTMLButtonElement): void {
+  button.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    quickButtonDragState = {
+      pointerId: event.pointerId,
+      dragging: false
+    };
+    button.setPointerCapture?.(event.pointerId);
+  });
+
+  button.addEventListener("pointermove", (event) => {
+    if (!quickButtonDragState || quickButtonDragState.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    const { left, top } = getQuickButtonDragPosition(event);
+    quickButtonDragState.dragging = true;
+    hideQuickTranslateMenu();
+    button.style.transition = "filter 160ms ease, box-shadow 160ms ease";
+    moveQuickButtonTo(left, top);
+  });
+
+  button.addEventListener("pointerup", (event) => {
+    if (!quickButtonDragState || quickButtonDragState.pointerId !== event.pointerId) return;
+    const wasDragging = quickButtonDragState.dragging;
+    quickButtonDragState = null;
+    button.releasePointerCapture?.(event.pointerId);
+    button.style.transition = "filter 160ms ease, box-shadow 160ms ease, transform 160ms ease";
+    if (!wasDragging) return;
+
+    event.preventDefault();
+    const { left, top } = getQuickButtonDragPosition(event);
+    const snappedPosition = snapQuickButtonToNearestEdge(left, top);
+    saveQuickButtonPosition(snappedPosition);
+    applyQuickButtonPosition(snappedPosition);
+    suppressQuickButtonClick = true;
+    window.setTimeout(() => {
+      suppressQuickButtonClick = false;
+    }, 0);
+  });
+
+  button.addEventListener("pointercancel", (event) => {
+    if (!quickButtonDragState || quickButtonDragState.pointerId !== event.pointerId) return;
+    quickButtonDragState = null;
+    button.style.transition = "filter 160ms ease, box-shadow 160ms ease, transform 160ms ease";
+    applyQuickButtonPosition(quickButtonPosition ?? getDefaultQuickButtonPosition());
+  });
+}
+
 function startPageTranslation(options: { force?: boolean; root?: ParentNode } = {}): void {
   if (pageTranslationJob) {
     if (continuousObserver) {
@@ -970,8 +1186,6 @@ function showQuickTranslateButton(): void {
     justifyContent: "center",
     display: "flex",
     position: "fixed",
-    right: "16px",
-    bottom: "16px",
     width: "48px",
     height: "48px",
     border: "0",
@@ -984,6 +1198,10 @@ function showQuickTranslateButton(): void {
     transition: "filter 160ms ease, box-shadow 160ms ease, transform 160ms ease",
     boxShadow: "0 12px 30px rgba(15, 23, 42, 0.22)"
   });
+  quickButtonPosition = getDefaultQuickButtonPosition();
+  applyQuickButtonPosition(quickButtonPosition);
+  void restoreQuickButtonPosition();
+  installQuickButtonDragHandlers(quickTranslateButton);
   quickTranslateButton.addEventListener("mouseenter", () => {
     quickTranslateButton!.style.transform = "translateY(-1px)";
   });
@@ -991,6 +1209,7 @@ function showQuickTranslateButton(): void {
     quickTranslateButton!.style.transform = "";
   });
   quickTranslateButton.addEventListener("click", () => {
+    if (suppressQuickButtonClick) return;
     if (continuousObserver) {
       stopContinuousTranslation();
       return;
@@ -1039,8 +1258,6 @@ function toggleQuickTranslateMenu(): void {
   quickTranslateMenu.dataset.translateAiQuickMenu = "true";
   Object.assign(quickTranslateMenu.style, {
     position: "fixed",
-    right: "16px",
-    bottom: "64px",
     minWidth: "190px",
     overflow: "hidden",
     borderRadius: "8px",
@@ -1048,90 +1265,13 @@ function toggleQuickTranslateMenu(): void {
     boxShadow: "0 14px 34px rgba(15, 23, 42, 0.22)",
     zIndex: "2147483647"
   });
+  positionFloatingElementNearQuickButton(quickTranslateMenu, 190);
   quickTranslateMenu.append(
     createMenuButton("Dịch phần mới", "translate-new", () => startPageTranslation({ force: true })),
     createMenuButton(continuousObserver ? "Dừng dịch liên tục" : "Dịch liên tục toàn trang", "watch-page", toggleContinuousTranslation),
     createMenuButton("Chọn vùng để dịch", "pick-region", startRegionPick)
   );
   document.body.append(quickTranslateMenu);
-}
-
-function removeSelectionUi(): void {
-  selectionButton?.remove();
-  selectionPanel?.remove();
-  selectionButton = null;
-  selectionPanel = null;
-}
-
-function showSelectionPanel(text: string): void {
-  selectionPanel?.remove();
-  selectionPanel = document.createElement("div");
-  selectionPanel.dataset.translateAiSelectionPanel = "true";
-  selectionPanel.dataset.translateAiUi = "true";
-  selectionPanel.textContent = text;
-  Object.assign(selectionPanel.style, {
-    position: "fixed",
-    right: "16px",
-    bottom: "64px",
-    maxWidth: "360px",
-    padding: "12px",
-    borderRadius: "8px",
-    background: "#111827",
-    color: "#ffffff",
-    fontSize: "14px",
-    lineHeight: "1.4",
-    zIndex: "2147483647",
-    boxShadow: "0 12px 30px rgba(15, 23, 42, 0.24)"
-  });
-  document.body.append(selectionPanel);
-}
-
-function replaceSelectionRange(range: Range, translated: string): void {
-  range.deleteContents();
-  range.insertNode(document.createTextNode(translated));
-  window.getSelection()?.removeAllRanges();
-  removeSelectionUi();
-}
-
-function showSelectionButton(): void {
-  const selection = window.getSelection();
-  const selectedText = selection?.toString().trim();
-  removeSelectionUi();
-  if (!selectedText || !selection || selection.rangeCount === 0) return;
-
-  const selectedRange = selection.getRangeAt(0).cloneRange();
-
-  selectionButton = document.createElement("button");
-  selectionButton.dataset.translateAiUi = "true";
-  selectionButton.type = "button";
-  selectionButton.textContent = "Translate";
-  Object.assign(selectionButton.style, {
-    position: "fixed",
-    right: "16px",
-    bottom: "64px",
-    padding: "9px 12px",
-    border: "0",
-    borderRadius: "999px",
-    background: "#2563eb",
-    color: "#ffffff",
-    fontSize: "13px",
-    fontWeight: "600",
-    cursor: "pointer",
-    zIndex: "2147483647",
-    boxShadow: "0 10px 24px rgba(37, 99, 235, 0.3)"
-  });
-
-  selectionButton.addEventListener("click", async () => {
-    selectionButton!.textContent = "Translating...";
-    try {
-      const result = await sendMessage<{ text: string }>({ type: "TRANSLATE_SELECTION", text: selectedText });
-      replaceSelectionRange(selectedRange, result.text);
-    } catch (error) {
-      showSelectionPanel(getErrorMessage(error));
-    }
-  });
-
-  document.body.append(selectionButton);
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -1154,7 +1294,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   return false;
 });
 
-document.addEventListener("selectionchange", () => window.setTimeout(showSelectionButton, 120));
 document.addEventListener("DOMContentLoaded", showQuickTranslateButton);
 window.addEventListener("pagehide", stopContinuousTranslation);
 showQuickTranslateButton();

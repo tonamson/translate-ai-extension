@@ -48,5 +48,4 @@ export type RuntimeMessage =
   | { type: "GET_TAB_STATUS"; tabId: number }
   | { type: "ANALYZE_PAGE"; sample: string }
   | { type: "TRANSLATE_ITEMS"; items: TextItem[] }
-  | { type: "TRANSLATE_SELECTION"; text: string }
   | { type: "SET_TAB_STATUS"; tabId?: number; status: TabStatus };
