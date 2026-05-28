@@ -175,6 +175,7 @@ describe("content script", () => {
     const indicator = document.querySelector<HTMLDivElement>("[data-translate-ai-page-indicator='true']");
     expect(indicator?.textContent).toContain("Translating");
     expect(indicator?.querySelector("[data-translate-ai-progress='true']")).not.toBeNull();
+    expect(indicator?.querySelector("[data-translate-ai-pause-translation='true']")).not.toBeNull();
     expect(indicator?.style.position).toBe("fixed");
     expect(indicator?.style.right).toBe("16px");
     expect(indicator?.style.bottom).toBe("16px");
@@ -185,6 +186,34 @@ describe("content script", () => {
     await expect(translationResponse).resolves.toEqual({ ok: true });
 
     expect(document.querySelector("[data-translate-ai-page-indicator='true']")).toBeNull();
+  });
+
+  it("pauses an active translation and ignores the pending API response", async () => {
+    const translation = createDeferred<{ items: { id: string; text: string }[] }>();
+    messageHandlers.TRANSLATE_ITEMS = () => translation.promise;
+    await loadContentScript();
+    document.body.innerHTML = "<main><p>This paragraph has enough English text for page translation.</p></main>";
+
+    await expect(sendContentMessage({ type: "MANUAL_TRANSLATE_PAGE" })).resolves.toEqual({ ok: true });
+    await waitFor(() => document.querySelector("[data-translate-ai-pause-translation='true']") !== null);
+
+    document.querySelector<HTMLButtonElement>("[data-translate-ai-pause-translation='true']")?.click();
+    await flushPromises();
+
+    expect(document.querySelector("[data-translate-ai-page-indicator='true']")).toBeNull();
+    expect(sentMessages).toContainEqual({
+      type: "SET_TAB_STATUS",
+      status: { status: "idle", message: "Translation paused" }
+    });
+
+    translation.resolve({
+      items: [{ id: "text-0", text: "vi:This paragraph has enough English text for page translation." }]
+    });
+    await flushPromises();
+
+    expect(document.querySelector("p")?.textContent).toBe(
+      "This paragraph has enough English text for page translation."
+    );
   });
 
   it("does not insert per-line translation loading markers", async () => {

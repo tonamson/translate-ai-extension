@@ -21,6 +21,8 @@ let continuousRoot: ParentNode = document.body;
 let highlightedRegionElement: Element | null = null;
 let pendingContinuousTranslation = false;
 let queuedTranslationNodes = new Set<Text>();
+let activeTranslationRunId = 0;
+const canceledTranslationRunIds = new Set<number>();
 let translationProgress = {
   active: false,
   completedBlocks: 0,
@@ -92,6 +94,20 @@ function shouldTranslatePage(settings: ExtensionSettings, analysis: PageAnalysis
 function hidePageTranslationIndicator(): void {
   pageTranslationIndicator?.remove();
   pageTranslationIndicator = null;
+}
+
+function isTranslationRunCanceled(runId: number): boolean {
+  return runId !== activeTranslationRunId || canceledTranslationRunIds.has(runId);
+}
+
+function cancelActiveTranslation(): void {
+  if (!pageTranslationJob && !continuousObserver && continuousTimer === null) return;
+  canceledTranslationRunIds.add(activeTranslationRunId);
+  pageTranslationJob = null;
+  stopContinuousTranslation();
+  quickTranslateButton?.removeAttribute("disabled");
+  void setTabStatus({ status: "idle", message: "Translation paused" }).catch(() => undefined);
+  logContentDebug("translate:cancel", { runId: activeTranslationRunId });
 }
 
 function getQueuedTranslationBlockCount(): number {
@@ -187,9 +203,46 @@ function showPageTranslationIndicator(message = "Preparing translation..."): voi
   pageTranslationIndicator = document.createElement("div");
   pageTranslationIndicator.dataset.translateAiPageIndicator = "true";
   pageTranslationIndicator.dataset.translateAiUi = "true";
+  const header = document.createElement("span");
+  header.dataset.translateAiProgressHeader = "true";
   const label = document.createElement("span");
   label.dataset.translateAiProgressLabel = "true";
   label.textContent = message;
+  const pauseButton = document.createElement("button");
+  pauseButton.type = "button";
+  pauseButton.title = "Hủy dịch";
+  pauseButton.dataset.translateAiPauseTranslation = "true";
+  pauseButton.dataset.translateAiUi = "true";
+  pauseButton.textContent = "Pause";
+  pauseButton.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    cancelActiveTranslation();
+  });
+  Object.assign(header.style, {
+    alignItems: "center",
+    display: "flex",
+    gap: "10px",
+    justifyContent: "space-between",
+    minWidth: "190px"
+  });
+  Object.assign(label.style, {
+    display: "block",
+    whiteSpace: "nowrap"
+  });
+  Object.assign(pauseButton.style, {
+    border: "0",
+    borderRadius: "999px",
+    background: "rgba(255, 255, 255, 0.14)",
+    color: "#ffffff",
+    cursor: "pointer",
+    flex: "0 0 auto",
+    fontSize: "11px",
+    fontWeight: "700",
+    lineHeight: "1",
+    padding: "6px 8px"
+  });
+  header.append(label, pauseButton);
   const progressTrack = document.createElement("span");
   progressTrack.dataset.translateAiProgress = "true";
   const progressBar = document.createElement("span");
@@ -211,7 +264,7 @@ function showPageTranslationIndicator(message = "Preparing translation..."): voi
     animation: "translate-ai-progress 1s ease-in-out infinite alternate"
   });
   progressTrack.append(progressBar);
-  pageTranslationIndicator.append(label, progressTrack);
+  pageTranslationIndicator.append(header, progressTrack);
   Object.assign(pageTranslationIndicator.style, {
     position: "fixed",
     right: "16px",
@@ -225,7 +278,7 @@ function showPageTranslationIndicator(message = "Preparing translation..."): voi
     lineHeight: "1",
     zIndex: "2147483647",
     boxShadow: "0 10px 24px rgba(15, 23, 42, 0.24)",
-    pointerEvents: "none"
+    pointerEvents: "auto"
   });
   const style = document.createElement("style");
   style.dataset.translateAiUi = "true";
@@ -314,9 +367,15 @@ function resolveRootWithText(root: ParentNode): ParentNode {
   return root;
 }
 
-async function translatePage({ force = false, root = document.body }: { force?: boolean; root?: ParentNode } = {}): Promise<void> {
+async function translatePage({
+  force = false,
+  root = document.body,
+  runId
+}: { force?: boolean; root?: ParentNode; runId: number }): Promise<void> {
+  if (isTranslationRunCanceled(runId)) return;
   showPageTranslationIndicator("Collecting text...");
   const settings = await sendMessage<ExtensionSettings>({ type: "GET_SETTINGS" });
+  if (isTranslationRunCanceled(runId)) return;
   const translationRoot = force ? resolveRootWithText(root) : root;
   const nodes = collectUntranslatedTextNodes(translationRoot);
   const sample = createPageSample(nodes);
@@ -348,6 +407,7 @@ async function translatePage({ force = false, root = document.body }: { force?: 
   if (!force) {
     showPageTranslationIndicator(`Analyzing ${nodes.length} text blocks...`);
     const analysis = await sendMessage<PageAnalysis>({ type: "ANALYZE_PAGE", sample });
+    if (isTranslationRunCanceled(runId)) return;
     if (!shouldTranslatePage(settings, analysis, force)) {
       hidePageTranslationIndicator();
       return;
@@ -359,6 +419,7 @@ async function translatePage({ force = false, root = document.body }: { force?: 
   try {
     const chunks = chunkCollectedTextNodes(nodes, MAX_TEXT_BLOCKS_PER_TRANSLATION_REQUEST);
     for (let index = 0; index < chunks.length; index += 1) {
+      if (isTranslationRunCanceled(runId)) return;
       const chunk = chunks[index];
       updateTranslationProgressUi(chunk.length);
       logContentDebug("translate:send", {
@@ -372,6 +433,7 @@ async function translatePage({ force = false, root = document.body }: { force?: 
         type: "TRANSLATE_ITEMS",
         items: chunk.map(({ id, text }) => ({ id, text }))
       });
+      if (isTranslationRunCanceled(runId)) return;
       logContentDebug("translate:response", {
         batchIndex: getCurrentTranslationBatch(chunk.length),
         batchCount: getTranslationBatchCount(),
@@ -389,6 +451,11 @@ async function translatePage({ force = false, root = document.body }: { force?: 
     }
   } finally {
     logContentDebug("translate:done");
+    if (isTranslationRunCanceled(runId)) {
+      resetTranslationProgress();
+      hidePageTranslationIndicator();
+      return;
+    }
     const hasFollowUpWork = continuousObserver !== null && (pendingContinuousTranslation || queuedTranslationNodes.size > 0);
     if (!hasFollowUpWork) {
       resetTranslationProgress();
@@ -463,8 +530,12 @@ function startPageTranslation(options: { force?: boolean; root?: ParentNode } = 
   resetQueuedTranslationState();
   updateQuickTranslateButtonState();
   quickTranslateButton?.setAttribute("disabled", "true");
-  pageTranslationJob = translatePage(options)
+  const runId = activeTranslationRunId + 1;
+  activeTranslationRunId = runId;
+  canceledTranslationRunIds.delete(runId);
+  pageTranslationJob = translatePage({ ...options, runId })
     .catch(async (error) => {
+      if (isTranslationRunCanceled(runId)) return;
       if (isExtensionContextInvalidated(error)) {
         hidePageTranslationIndicator();
         return;
@@ -476,10 +547,12 @@ function startPageTranslation(options: { force?: boolean; root?: ParentNode } = 
       }
     })
     .finally(() => {
+      canceledTranslationRunIds.delete(runId);
+      if (runId !== activeTranslationRunId) return;
       pageTranslationJob = null;
       quickTranslateButton?.removeAttribute("disabled");
       updateQuickTranslateButtonState();
-      if (pendingContinuousTranslation && continuousObserver) {
+      if (!isTranslationRunCanceled(runId) && pendingContinuousTranslation && continuousObserver) {
         pendingContinuousTranslation = false;
         logContentDebug("translate:pending-run", {
           root: continuousRoot instanceof Element ? describeElement(continuousRoot) : "document"
