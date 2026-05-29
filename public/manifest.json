@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "Local AI Page Translator",
-  "description": "Translate web pages with a StepFun-compatible AI model.",
+  "name": "AI Translate",
+  "description": "Translate web pages with AI.",
   "version": "0.1.0",
   "permissions": ["activeTab", "storage", "scripting"],
   "host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
@@ -12,7 +12,7 @@
     "128": "icons/icon-128.png"
   },
   "action": {
-    "default_title": "Local AI Translator",
+    "default_title": "AI Translate",
     "default_popup": "src/popup/index.html",
     "default_icon": {
       "16": "icons/icon-16.png",
