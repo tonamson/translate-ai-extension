@@ -132,10 +132,21 @@ function fillForm(settings: ExtensionSettings): void {
   openaiApiKey.value = settings.openaiApiKey;
 }
 
+const STATUS_LABELS: Partial<Record<string, string>> = {
+  idle:        "Ready",
+  detecting:   "Detecting…",
+  "not-needed": "No translation needed",
+  translating: "Translating…",
+  translated:  "Translated",
+  restored:    "Restored",
+  error:       "Error",
+};
+
 function renderStatus(status: TabStatus): void {
+  const label = STATUS_LABELS[status.status] ?? status.status;
   statusText.textContent = status.detectedLanguage
-    ? `${status.status} · ${status.detectedLanguage}`
-    : status.message ?? status.status;
+    ? `${label} · ${status.detectedLanguage}`
+    : status.message ?? label;
   statusDot.dataset.status = status.status;
 }
 

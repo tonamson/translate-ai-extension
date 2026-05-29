@@ -212,19 +212,31 @@ function getQuickButtonViewportBox(): { left: number; top: number; width: number
 function positionFloatingElementNearQuickButton(element: HTMLElement, preferredWidth: number): void {
   const anchor = getQuickButtonViewportBox();
   const gap = 8;
-  const maxLeft = Math.max(QUICK_BUTTON_MARGIN, window.innerWidth - preferredWidth - QUICK_BUTTON_MARGIN);
-  const left = clampNumber(anchor.left + anchor.width / 2 - preferredWidth / 2, QUICK_BUTTON_MARGIN, maxLeft);
-  const opensBelow = anchor.top + anchor.height / 2 < window.innerHeight / 2;
-  const top = opensBelow
-    ? anchor.top + anchor.height + gap
-    : Math.max(QUICK_BUTTON_MARGIN, anchor.top - gap - 160);
 
-  Object.assign(element.style, {
-    left: `${left}px`,
-    top: `${top}px`,
-    right: "",
-    bottom: ""
-  });
+  // Align menu's right edge to button's right edge, clamped to viewport
+  const buttonRight = anchor.left + anchor.width;
+  const left = clampNumber(
+    buttonRight - preferredWidth,
+    QUICK_BUTTON_MARGIN,
+    Math.max(QUICK_BUTTON_MARGIN, window.innerWidth - preferredWidth - QUICK_BUTTON_MARGIN)
+  );
+
+  const opensBelow = anchor.top + anchor.height / 2 < window.innerHeight / 2;
+
+  if (opensBelow) {
+    Object.assign(element.style, {
+      left: `${left}px`,
+      top: `${anchor.top + anchor.height + gap}px`,
+      bottom: ""
+    });
+  } else {
+    // Anchor bottom of menu to top of button so it always hugs the icon
+    Object.assign(element.style, {
+      left: `${left}px`,
+      top: "",
+      bottom: `${window.innerHeight - anchor.top + gap}px`
+    });
+  }
 }
 
 function snapQuickButtonToNearestEdge(left: number, top: number): QuickButtonPosition {

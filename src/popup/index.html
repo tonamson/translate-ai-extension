@@ -7,17 +7,28 @@
   </head>
   <body>
     <main class="popup">
+      <!-- Header -->
       <header class="header">
-        <div>
-          <h1>AI Translate</h1>
-          <p id="statusText" aria-live="polite">Loading...</p>
+        <div class="brand">
+          <div class="brand-icon" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"/>
+              <line x1="2" y1="12" x2="22" y2="12"/>
+              <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+            </svg>
+          </div>
+          <span class="brand-name">AI Translate</span>
         </div>
-        <span id="statusDot" class="status-dot" aria-hidden="true"></span>
+        <div class="status-pill">
+          <span id="statusDot" class="status-dot" aria-hidden="true"></span>
+          <span id="statusText" class="status-label" aria-live="polite">Loading…</span>
+        </div>
       </header>
 
-      <label>
-        Target language
-        <select id="targetLanguage">
+      <!-- Language -->
+      <div class="field-block">
+        <label class="field-label" for="targetLanguage">Target Language</label>
+        <select id="targetLanguage" class="field-select">
           <option value="Vietnamese">Vietnamese</option>
           <option value="English">English</option>
           <option value="Japanese">Japanese</option>
@@ -31,24 +42,86 @@
           <option value="Portuguese">Portuguese</option>
           <option value="Russian">Russian</option>
         </select>
-      </label>
-      <label>
-        API type
-        <select id="apiProvider">
-          <option value="openai-compatible">OpenAI-compatible</option>
-          <option value="anthropic">Anthropic</option>
-        </select>
-      </label>
-      <label>API base URL <input id="openaiBaseUrl" /></label>
-      <label>AI model <input id="openaiModel" /></label>
-      <label>API key <input id="openaiApiKey" type="password" /></label>
+      </div>
 
-      <section class="actions">
-        <button id="saveButton">Save</button>
-        <button id="translateButton" type="button">Translate page</button>
-        <button id="restoreButton" type="button">Restore</button>
-      </section>
+      <!-- API Configuration section -->
+      <div class="config-section">
+        <div class="config-section-header">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/>
+          </svg>
+          <span>API Configuration</span>
+        </div>
+
+        <div class="config-fields">
+          <div class="field-block">
+            <label class="field-label" for="apiProvider">Provider</label>
+            <select id="apiProvider" class="field-select">
+              <option value="openai-compatible">OpenAI-compatible</option>
+              <option value="anthropic">Anthropic</option>
+            </select>
+          </div>
+
+          <div class="field-block">
+            <label class="field-label" for="openaiBaseUrl">Base URL</label>
+            <input id="openaiBaseUrl" class="mono-input" type="url" placeholder="https://api.openai.com/v1" autocomplete="off" spellcheck="false" />
+          </div>
+
+          <div class="field-row">
+            <div class="field-block">
+              <label class="field-label" for="openaiModel">Model</label>
+              <input id="openaiModel" class="mono-input" type="text" placeholder="gpt-4o" autocomplete="off" spellcheck="false" />
+            </div>
+          </div>
+
+          <div class="field-block">
+            <label class="field-label" for="openaiApiKey">API Key</label>
+            <div class="input-wrapper">
+              <input id="openaiApiKey" class="mono-input" type="password" placeholder="sk-···" autocomplete="new-password" spellcheck="false" />
+              <button type="button" class="key-toggle" id="keyToggle" aria-label="Show API key">
+                <svg id="eyeIcon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                  <circle cx="12" cy="12" r="3"/>
+                </svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Actions -->
+      <div class="actions">
+        <button id="restoreButton" class="btn btn-ghost" type="button">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="1 4 1 10 7 10"/>
+            <path d="M3.51 15a9 9 0 1 0 .49-3.44"/>
+          </svg>
+          Restore
+        </button>
+        <button id="saveButton" class="btn btn-primary" type="button">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+            <polyline points="17 21 17 13 7 13 7 21"/>
+            <polyline points="7 3 7 8 15 8"/>
+          </svg>
+          Save settings
+        </button>
+      </div>
+      <!-- Hidden: kept for JS compatibility -->
+      <button id="translateButton" type="button" style="display:none" aria-hidden="true"></button>
     </main>
+
     <script type="module" src="./main.ts"></script>
+    <script>
+      // Eye toggle for API key
+      document.getElementById('keyToggle').addEventListener('click', function() {
+        const input = document.getElementById('openaiApiKey');
+        const isPassword = input.type === 'password';
+        input.type = isPassword ? 'text' : 'password';
+        this.setAttribute('aria-label', isPassword ? 'Hide API key' : 'Show API key');
+        this.classList.toggle('active', isPassword);
+      });
+    </script>
   </body>
 </html>
