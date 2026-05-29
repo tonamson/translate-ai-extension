@@ -1,7 +1,7 @@
 import type { ApiProvider, ExtensionSettings } from "./types";
 
 export const DEFAULT_SETTINGS: ExtensionSettings = {
-  targetLanguage: "Vietnamese",
+  targetLanguage: "English",
   autoTranslate: false,
   apiProvider: "openai-compatible",
   openaiBaseUrl: "https://api.stepfun.ai/v1",
