@@ -51,6 +51,7 @@ type QuickButtonDragState = {
 let quickButtonPosition: QuickButtonPosition | null = null;
 let quickButtonDragState: QuickButtonDragState | null = null;
 let suppressQuickButtonClick = false;
+let selectionBubble: HTMLDivElement | null = null;
 
 type BackgroundErrorResponse = {
   error: string;
@@ -1173,6 +1174,299 @@ async function restoreOriginals(): Promise<void> {
   await setTabStatus({ status: "restored" });
 }
 
+const SELECTION_BUBBLE_LANGUAGES = [
+  "English", "Vietnamese", "Japanese", "Korean", "Chinese",
+  "Thai", "Indonesian", "French", "German", "Spanish", "Portuguese", "Russian"
+];
+
+function hideSelectionBubble(): void {
+  selectionBubble?.remove();
+  selectionBubble = null;
+}
+
+function positionSelectionBubble(element: HTMLElement, rect: DOMRect): void {
+  const gap = 8;
+  const estimatedHeight = 36;
+  const maxWidth = 300;
+  const top = rect.top > estimatedHeight + gap + 8
+    ? rect.top - estimatedHeight - gap
+    : rect.bottom + gap;
+  const left = Math.max(8, Math.min(
+    rect.left + rect.width / 2 - maxWidth / 2,
+    window.innerWidth - maxWidth - 8
+  ));
+  Object.assign(element.style, { left: `${left}px`, top: `${top}px` });
+}
+
+function createSelectionCloseButton(onClick: () => void): HTMLButtonElement {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.dataset.translateAiUi = "true";
+  btn.textContent = "×";
+  Object.assign(btn.style, {
+    border: "0",
+    background: "transparent",
+    color: "rgba(255,255,255,0.5)",
+    cursor: "pointer",
+    fontSize: "18px",
+    fontWeight: "300",
+    lineHeight: "1",
+    padding: "0 2px",
+    flexShrink: "0",
+    alignSelf: "center"
+  });
+  btn.addEventListener("click", (e) => { e.stopPropagation(); onClick(); });
+  return btn;
+}
+
+function replaceSelectionWithText(range: Range, text: string): boolean {
+  try {
+    const container = range.commonAncestorContainer;
+    const element = container instanceof Element ? container : container.parentElement;
+    if (!element?.isContentEditable) return false;
+    const selection = window.getSelection();
+    if (!selection) return false;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return document.execCommand("insertText", false, text);
+  } catch {
+    return false;
+  }
+}
+
+function showSelectionTranslateBubble(text: string, rect: DOMRect, defaultLanguage: string, savedRange: Range | null): void {
+  hideSelectionBubble();
+
+  const bubble = document.createElement("div");
+  bubble.dataset.translateAiUi = "true";
+  bubble.dataset.translateAiSelectionBubble = "true";
+  Object.assign(bubble.style, {
+    position: "fixed",
+    display: "flex",
+    alignItems: "center",
+    gap: "6px",
+    padding: "7px 10px",
+    background: "#111827",
+    color: "#f9fafb",
+    borderRadius: "8px",
+    fontSize: "13px",
+    fontWeight: "500",
+    lineHeight: "1.3",
+    boxShadow: "0 8px 24px rgba(15, 23, 42, 0.32)",
+    zIndex: "2147483647",
+    maxWidth: "340px",
+    flexWrap: "nowrap"
+  });
+
+  selectionBubble = bubble;
+  document.body.append(bubble);
+  positionSelectionBubble(bubble, rect);
+
+  const clearBubble = (): void => {
+    while (bubble.firstChild) bubble.removeChild(bubble.firstChild);
+  };
+
+  let selectedLanguage = defaultLanguage;
+
+  const createLanguageSelect = (): HTMLSelectElement => {
+    const select = document.createElement("select");
+    select.dataset.translateAiUi = "true";
+    Object.assign(select.style, {
+      border: "0",
+      borderRadius: "4px",
+      background: "rgba(255,255,255,0.12)",
+      color: "#e5e7eb",
+      cursor: "pointer",
+      fontSize: "11px",
+      fontWeight: "600",
+      padding: "3px 5px",
+      flexShrink: "0",
+      outline: "none"
+    });
+    for (const lang of SELECTION_BUBBLE_LANGUAGES) {
+      const option = document.createElement("option");
+      option.value = lang;
+      option.textContent = lang;
+      if (lang === selectedLanguage) option.selected = true;
+      select.append(option);
+    }
+    select.addEventListener("change", () => { selectedLanguage = select.value; });
+    return select;
+  };
+
+  const renderTrigger = (): void => {
+    clearBubble();
+    bubble.style.flexWrap = "nowrap";
+    const langSelect = createLanguageSelect();
+    const translateBtn = document.createElement("button");
+    translateBtn.type = "button";
+    translateBtn.dataset.translateAiUi = "true";
+    translateBtn.textContent = "→";
+    Object.assign(translateBtn.style, {
+      border: "0",
+      borderRadius: "4px",
+      background: "rgba(255,255,255,0.12)",
+      color: "#e5e7eb",
+      cursor: "pointer",
+      fontSize: "12px",
+      fontWeight: "700",
+      padding: "4px 8px",
+      flexShrink: "0",
+      whiteSpace: "nowrap"
+    });
+    translateBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      selectedLanguage = langSelect.value;
+      renderLoading();
+      void performTranslation();
+    });
+    bubble.append(langSelect, translateBtn, createSelectionCloseButton(hideSelectionBubble));
+  };
+
+  const renderLoading = (): void => {
+    clearBubble();
+    bubble.style.flexWrap = "nowrap";
+    const span = document.createElement("span");
+    span.textContent = "Đang dịch...";
+    span.style.color = "rgba(255,255,255,0.7)";
+    span.style.fontSize = "12px";
+    bubble.append(span, createSelectionCloseButton(hideSelectionBubble));
+  };
+
+  const renderResult = (resultText: string): void => {
+    clearBubble();
+    bubble.style.flexWrap = "wrap";
+    const span = document.createElement("span");
+    span.textContent = resultText;
+    span.style.flex = "1 1 auto";
+    span.style.minWidth = "0";
+    span.style.wordBreak = "break-word";
+
+    const copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.dataset.translateAiUi = "true";
+    copyBtn.textContent = "Copy";
+    Object.assign(copyBtn.style, {
+      border: "0",
+      borderRadius: "4px",
+      background: "rgba(255,255,255,0.12)",
+      color: "#e5e7eb",
+      cursor: "pointer",
+      fontSize: "11px",
+      padding: "3px 6px",
+      flexShrink: "0"
+    });
+    copyBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      void navigator.clipboard.writeText(resultText).catch(() => undefined);
+      copyBtn.textContent = "✓";
+      window.setTimeout(() => { copyBtn.textContent = "Copy"; }, 1200);
+    });
+
+    const actionButtons: HTMLElement[] = [span, copyBtn];
+
+    if (savedRange !== null) {
+      const replaceBtn = document.createElement("button");
+      replaceBtn.type = "button";
+      replaceBtn.dataset.translateAiUi = "true";
+      replaceBtn.textContent = "Replace";
+      Object.assign(replaceBtn.style, {
+        border: "0",
+        borderRadius: "4px",
+        background: "rgba(96,165,250,0.2)",
+        color: "#93c5fd",
+        cursor: "pointer",
+        fontSize: "11px",
+        padding: "3px 6px",
+        flexShrink: "0"
+      });
+      replaceBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const ok = replaceSelectionWithText(savedRange, resultText);
+        if (ok) {
+          hideSelectionBubble();
+        } else {
+          replaceBtn.textContent = "✗";
+          window.setTimeout(() => { replaceBtn.textContent = "Replace"; }, 1200);
+        }
+      });
+      actionButtons.push(replaceBtn);
+    }
+
+    actionButtons.push(createSelectionCloseButton(hideSelectionBubble));
+    bubble.append(...actionButtons);
+    positionSelectionBubble(bubble, rect);
+  };
+
+  const renderError = (message: string): void => {
+    clearBubble();
+    bubble.style.flexWrap = "nowrap";
+    const span = document.createElement("span");
+    span.textContent = message;
+    span.style.color = "#fca5a5";
+    span.style.fontSize = "12px";
+    bubble.append(span, createSelectionCloseButton(hideSelectionBubble));
+  };
+
+  const performTranslation = async (): Promise<void> => {
+    try {
+      const result = await sendMessage<{ text: string }>({
+        type: "TRANSLATE_TEXT",
+        text,
+        targetLanguage: selectedLanguage
+      });
+      if (selectionBubble !== bubble) return;
+      renderResult(result.text);
+    } catch (error) {
+      if (selectionBubble !== bubble) return;
+      renderError(getErrorMessage(error));
+    }
+  };
+
+  renderTrigger();
+}
+
+async function handleTextSelection(): Promise<void> {
+  const focused = document.activeElement;
+  if (focused instanceof HTMLInputElement || focused instanceof HTMLTextAreaElement) return;
+
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed || !selection.rangeCount) {
+    hideSelectionBubble();
+    return;
+  }
+
+  const text = selection.toString().trim();
+  if (text.length < 2) {
+    hideSelectionBubble();
+    return;
+  }
+
+  const range = selection.getRangeAt(0);
+  const container = range.commonAncestorContainer;
+  const containerElement = container instanceof Element ? container : container.parentElement;
+  if (containerElement?.closest("[data-translate-ai-ui='true']")) return;
+
+  const isEditable = containerElement?.isContentEditable === true;
+  const savedRange = isEditable ? range.cloneRange() : null;
+
+  try {
+    const settings = await sendMessage<ExtensionSettings>({ type: "GET_SETTINGS" });
+
+    const currentSelection = window.getSelection();
+    if (!currentSelection || currentSelection.isCollapsed) return;
+    if (currentSelection.toString().trim() !== text) return;
+
+    const currentRange = currentSelection.getRangeAt(0);
+    const currentRect = currentRange.getBoundingClientRect();
+    if (currentRect.width === 0 && currentRect.height === 0) return;
+
+    showSelectionTranslateBubble(text, currentRect, settings.targetLanguage, savedRange);
+  } catch {
+    // Extension context may be invalid
+  }
+}
+
 function showQuickTranslateButton(): void {
   if (quickTranslateButton?.isConnected) return;
 
@@ -1292,6 +1586,28 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return false;
   }
   return false;
+});
+
+document.addEventListener("mouseup", (event) => {
+  if ((event.target as Element).closest?.("[data-translate-ai-ui='true']")) return;
+  window.setTimeout(() => { void handleTextSelection(); }, 0);
+});
+
+document.addEventListener("mousedown", (event) => {
+  if ((event.target as Element).closest?.("[data-translate-ai-selection-bubble='true']")) return;
+  hideSelectionBubble();
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") hideSelectionBubble();
+});
+
+document.addEventListener("keyup", (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key === "a") {
+    const focused = document.activeElement;
+    if (focused instanceof HTMLInputElement || focused instanceof HTMLTextAreaElement) return;
+    window.setTimeout(() => { void handleTextSelection(); }, 50);
+  }
 });
 
 document.addEventListener("DOMContentLoaded", showQuickTranslateButton);

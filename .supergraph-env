@@ -1,0 +1,6 @@
+PROJECT_TYPE=node
+TEST_CMD=npm test
+LINT_CMD=npx tsc --noEmit
+FORMAT_CMD=npx prettier --write .
+BUILD_CMD=npm run build
+BRANCH=main

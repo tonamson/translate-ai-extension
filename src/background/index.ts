@@ -173,6 +173,12 @@ async function handleMessage(message: RuntimeMessage, sender: chrome.runtime.Mes
     }
   }
 
+  if (message.type === "TRANSLATE_TEXT") {
+    const overriddenSettings = { ...settings, targetLanguage: message.targetLanguage };
+    const items = await translateItems(overriddenSettings, [{ id: "sel", text: message.text }]);
+    return { text: items[0]?.text ?? message.text };
+  }
+
   return { ok: false };
 }
 

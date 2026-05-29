@@ -14,7 +14,7 @@ const restoreButton = document.querySelector<HTMLButtonElement>("#restoreButton"
 
 const OPEN_WEB_PAGE_MESSAGE = "Open a web page to translate.";
 const PAGE_NOT_READY_MESSAGE = "This page is not ready for translation.";
-const DEFAULT_TARGET_LANGUAGE = "Vietnamese";
+const DEFAULT_TARGET_LANGUAGE = "English";
 const DEFAULT_OPENAI_BASE_URL = "https://api.stepfun.ai/v1";
 const DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1";
 
