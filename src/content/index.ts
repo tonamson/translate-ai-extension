@@ -1532,23 +1532,63 @@ function hideQuickTranslateMenu(): void {
   quickTranslateMenu = null;
 }
 
+const MENU_ICONS: Record<string, string> = {
+  "translate-new": `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>`,
+  "watch-page":    `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`,
+  "watch-stop":    `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>`,
+  "pick-region":   `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h5v5H3zM3 16h5v5H3zM16 3h5v5h-5zM16 16h5v5h-5z"/><line x1="8" y1="5.5" x2="16" y2="5.5"/><line x1="5.5" y1="8" x2="5.5" y2="16"/><line x1="18.5" y1="8" x2="18.5" y2="16"/><line x1="8" y1="18.5" x2="16" y2="18.5"/></svg>`,
+};
+
 function createMenuButton(label: string, action: string, onClick: () => void): HTMLButtonElement {
   const button = document.createElement("button");
   button.type = "button";
   button.dataset.translateAiMenuAction = action;
-  button.textContent = label;
+  button.dataset.translateAiUi = "true";
+
+  const iconSvg = MENU_ICONS[action] ?? MENU_ICONS["translate-new"];
+  const iconWrap = document.createElement("span");
+  iconWrap.dataset.translateAiUi = "true";
+  iconWrap.innerHTML = iconSvg;
+  Object.assign(iconWrap.style, {
+    display: "flex",
+    alignItems: "center",
+    flexShrink: "0",
+    color: "#6b7280"
+  });
+
+  const labelSpan = document.createElement("span");
+  labelSpan.textContent = label;
+  labelSpan.dataset.translateAiUi = "true";
+
+  button.append(iconWrap, labelSpan);
+
   Object.assign(button.style, {
-    display: "block",
+    display: "flex",
+    alignItems: "center",
+    gap: "10px",
     width: "100%",
     border: "0",
-    padding: "9px 10px",
+    padding: "9px 12px",
     background: "transparent",
     color: "#111827",
+    fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif",
     fontSize: "13px",
-    fontWeight: "600",
+    fontWeight: "500",
     textAlign: "left",
-    cursor: "pointer"
+    cursor: "pointer",
+    borderRadius: "6px",
+    transition: "background 0.1s"
   });
+
+  button.addEventListener("mouseenter", () => {
+    button.style.background = "#f3f4f6";
+    iconWrap.style.color = "#4f7ef8";
+  });
+  button.addEventListener("mouseleave", () => {
+    button.style.background = "transparent";
+    iconWrap.style.color = "#6b7280";
+  });
+
   button.addEventListener("click", onClick);
   return button;
 }
@@ -1564,19 +1604,25 @@ function toggleQuickTranslateMenu(): void {
   quickTranslateMenu.dataset.translateAiQuickMenu = "true";
   Object.assign(quickTranslateMenu.style, {
     position: "fixed",
-    minWidth: "190px",
-    overflow: "hidden",
-    borderRadius: "8px",
+    minWidth: "210px",
+    padding: "5px",
+    borderRadius: "12px",
     background: "#ffffff",
-    boxShadow: "0 14px 34px rgba(15, 23, 42, 0.22)",
+    border: "1px solid #e5e7eb",
+    boxShadow: "0 8px 24px rgba(15, 23, 42, 0.12), 0 2px 6px rgba(15, 23, 42, 0.06)",
     zIndex: "2147483647"
   });
-  positionFloatingElementNearQuickButton(quickTranslateMenu, 190);
+
+  const watchAction = continuousObserver ? "watch-stop" : "watch-page";
+  const watchLabel = continuousObserver ? "Dừng dịch liên tục" : "Dịch liên tục toàn trang";
+
   quickTranslateMenu.append(
-    createMenuButton("Dịch phần mới", "translate-new", () => startPageTranslation({ force: true })),
-    createMenuButton(continuousObserver ? "Dừng dịch liên tục" : "Dịch liên tục toàn trang", "watch-page", toggleContinuousTranslation),
+    createMenuButton("Dịch trang", "translate-new", () => startPageTranslation({ force: true })),
+    createMenuButton(watchLabel, watchAction, toggleContinuousTranslation),
     createMenuButton("Chọn vùng để dịch", "pick-region", startRegionPick)
   );
+
+  positionFloatingElementNearQuickButton(quickTranslateMenu, 210);
   document.body.append(quickTranslateMenu);
 }
 
